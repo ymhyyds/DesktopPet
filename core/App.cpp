@@ -12,6 +12,7 @@
 #include "../memory/MemoryDB.h"
 
 #include "../interaction/InteractionManager.h"
+#include "../interaction/InputProxyWindow.h"
 #include "../tray/TrayManager.h"
 #include "../chat/ChatWindow.h"
 #include "../pet/Live2DView.h"
@@ -234,9 +235,60 @@ bool App::initialize()
     m_promptManager->setPersonality(cfg.personality, cfg.name);
 
     // ---------------------------------------------------------------
-    // 5. 交互管理器：单击/双击/长按/挂机
+    // 5. 输入代理窗口 + 交互管理器：单击/双击/长按/挂机
     // ---------------------------------------------------------------
-    m_interactionManager = std::make_unique<InteractionManager>(m_petWindow.get());
+    // ★ Phase 2: InputProxyWindow 在 PetWindow 之上处理所有输入
+    m_inputProxyWindow = std::make_unique<InputProxyWindow>(
+        m_petWindow.get(), m_petWindow->live2DView());
+    // InteractionManager 安装在 InputProxyWindow 上（不再直接装在 PetWindow）
+    m_interactionManager = std::make_unique<InteractionManager>(m_inputProxyWindow.get());
+
+    // 初始 mask（暂不 show，等 PetWindow show 之后再 show）
+
+    // 模型加载 → mask 更新
+    connect(m_petWindow.get(), &PetWindow::modelSizeLoaded, this, [this]() {
+        m_inputProxyWindow->syncGeometry();
+        m_inputProxyWindow->updateInputMask();
+    });
+
+    // 模型稳定包围盒 → mask 更新
+    // (使用 Live2DView::stableBoundsReady 信号，通过 PetWindow 的 modelSizeLoaded 间接处理，
+    //  但 PetWindow 的 stableBoundsReady 连接只调 applyTightSize，不 emit modelSizeLoaded，
+    //  所以需要单独连接 live2DView 的信号)
+    {
+        auto *lv = m_petWindow->live2DView();
+        if (lv) {
+            connect(lv, &Live2DView::stableBoundsReady, this, [this]() {
+                m_inputProxyWindow->syncGeometry();
+                m_inputProxyWindow->updateInputMask();
+            });
+        }
+    }
+
+    // 缩放 → mask 更新
+    connect(m_petWindow.get(), &PetWindow::modelScaleChanged, this, [this]() {
+        m_inputProxyWindow->syncGeometry();
+        m_inputProxyWindow->updateInputMask();
+    });
+
+    // 拖拽结束 → 吸附检测 + geometry 同步
+    connect(m_inputProxyWindow.get(), &InputProxyWindow::dragFinished,
+            this, [this]() {
+                m_windowManager->trySnapToEdge(m_petWindow.get());
+                m_inputProxyWindow->syncGeometry();
+            });
+
+    // 窗口可见性同步（全局快捷键隐藏/显示桌宠时同步 InputProxyWindow）
+    // 通过 PetWindow::modelSizeLoaded 在首次 show 后同步（无需 show/hide event filter）
+
+    // 定期维护 Z-order：InputProxyWindow 必须在 PetWindow 之上
+    auto *zOrderTimer = new QTimer(this);
+    connect(zOrderTimer, &QTimer::timeout, this, [this]() {
+        if (m_inputProxyWindow && m_inputProxyWindow->isVisible()) {
+            m_inputProxyWindow->raise();
+        }
+    });
+    zOrderTimer->start(2000);  // 2秒间隔 — 足够弥补 SetWindowPos(HWND_TOPMOST) 的影响
 
     // ---------------------------------------------------------------
     // 6. 聊天窗口 + 设置窗口
@@ -290,6 +342,12 @@ bool App::initialize()
     }
 
     m_petWindow->show();
+
+    // ★ Phase 2: InputProxyWindow 在 PetWindow 显示之后 show，Z-order 在其上方
+    m_inputProxyWindow->updateInputMask();
+    m_inputProxyWindow->show();
+    m_inputProxyWindow->raise();  // 确保在 PetWindow 之上
+
     m_trayManager->show();
 
     // 恢复头部追踪设置
@@ -676,11 +734,6 @@ void App::setupConnections()
                 }
             });
 
-    // --- 桌宠拖拽 → 吸附检测 ---
-    connect(m_petWindow.get(), &PetWindow::dragFinished,
-            this, [this]() {
-                m_windowManager->trySnapToEdge(m_petWindow.get());
-            });
 
     // --- 模型加载后重新定位 ---
     connect(m_petWindow.get(), &PetWindow::modelSizeLoaded,
@@ -698,8 +751,14 @@ void App::setupConnections()
                 case HK::TogglePetVisibility:
                     if (m_petWindow->isVisible()) {
                         m_petWindow->hide();
+                        if (m_inputProxyWindow) m_inputProxyWindow->hide();
                     } else {
                         m_petWindow->show();
+                        if (m_inputProxyWindow) {
+                            m_inputProxyWindow->syncGeometry();
+                            m_inputProxyWindow->show();
+                            m_inputProxyWindow->raise();
+                        }
                     }
                     break;
 

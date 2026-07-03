@@ -79,6 +79,8 @@ set(MEMORY_SOURCES
 set(INTERACTION_SOURCES
     interaction/InteractionManager.cpp
     interaction/InteractionManager.h
+    interaction/InputProxyWindow.cpp
+    interaction/InputProxyWindow.h
 )
 
 set(TRAY_SOURCES

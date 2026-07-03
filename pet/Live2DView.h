@@ -61,6 +61,15 @@ public:
     /// 判断一个窗口局部坐标是否在模型实际绘制区域内（排除动画安全边距）
     bool isPointInModelArea(const QPoint &localPos) const;
 
+    /// 公开命中检测 — 供 InputProxyWindow 调用
+    /// @return true=命中某个交互区域（模型有内容可交互）
+    /// @param outIsHead true=头部命中，false=身体命中
+    bool hitTestAt(float px, float py, bool &outIsHead) const;
+
+    /// 公开 Alpha 检测 — 供 InputProxyWindow 调用
+    /// @return true=像素透明度 >= threshold（有效点击）
+    bool alphaTestAt(float px, float py, unsigned char threshold = 30);
+
     /// 返回模型紧贴包围盒在窗口像素坐标系中的矩形区域
     /// @return true=模型已加载且包围盒有效
     bool getModelPixelRect(float &outX0, float &outY0,

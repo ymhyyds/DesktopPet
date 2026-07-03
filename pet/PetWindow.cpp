@@ -40,18 +40,13 @@ PetWindow::PetWindow(const CharacterConfig &initialConfig, QWidget *parent)
     setAttribute(Qt::WA_TranslucentBackground, true);
     setAutoFillBackground(false);
 
-    // 安装应用级原生事件过滤器（仅返回 HTCLIENT，穿透由 SetWindowRgn 独立负责）
-    // 只过滤 HWND 是否为 PetWindow 层级，不检查模型区域——mask 以外的区域 Windows 不递送消息
+    // ★ Phase 1: 暂不安装原生事件过滤器（移除了 mask，统一由 InputProxyWindow 处理）
+    // 注：保留 install 但 nativeEventFilter 改为始终返回 HTTRANSPARENT，实现全窗口穿透
 #if defined(Q_OS_WIN)
     qApp->installNativeEventFilter(this);
 #endif
 
-    // mask 更新定时器：200ms（5Hz），仅 m_maskActive 或 m_maskDirty 时执行
-    // 稳定运动包络：扩张即时（>3px），收缩延迟 2 秒，25px 额外边距
-    m_maskTimer = new QTimer(this);
-    m_maskTimer->setInterval(kMaskPollIntervalMs);  // 200ms
-    connect(m_maskTimer, &QTimer::timeout, this, &PetWindow::onMaskTimer);
-    m_maskTimer->start();  // 一直运行，onMaskTimer 中根据 m_maskActive 选择是否执行
+    // ★ Phase 1: mask 定时器已移除（setMask/SetWindowRgn 不再使用）
 
     m_live2DView = new Live2DView(this);
     m_live2DView->setGeometry(rect());
@@ -64,10 +59,7 @@ PetWindow::PetWindow(const CharacterConfig &initialConfig, QWidget *parent)
         m_canvasHeight = ch;
         applyTightSize();
         emit modelSizeLoaded();
-        // mask: 模型加载 → 立即刷新包络 + 激活轮询
-        m_hasCachedMask = false;
-        m_maskActive = true;
-        updateModelMask();
+        // ★ Phase 1: mask 已移除 — 无闪烁
     });
 
     // idle 稳定后的包围盒更接近视觉大小，覆盖初始姿态的值
@@ -75,16 +67,14 @@ PetWindow::PetWindow(const CharacterConfig &initialConfig, QWidget *parent)
         m_tightModelWidth  = tightW;
         m_tightModelHeight = tightH;
         applyTightSize();
-        m_hasCachedMask = false;
-        m_maskActive = true;
-        updateModelMask();
+        // ★ Phase 1: mask 已移除
     });
 
     // 好感度变化 在 contextMenuEvent 中与操作文字合并显示，避免重叠
 
-    // 点击模型头部 → 摸摸头（动画时启动物理跟随 → mask 需刷新）
+    // 点击模型头部 → 摸摸头
     connect(m_live2DView, &Live2DView::headClicked, this, [this]() {
-        markMaskDirty();
+        // ★ Phase 1: markMaskDirty 已移除（无 mask）
         triggerPet();
     });
 
@@ -172,7 +162,7 @@ void PetWindow::setModelScale(double scale)
              static_cast<int>(centerY - height() / 2.0));
     }
 
-    markMaskDirty();
+    // ★ Phase 1: markMaskDirty 已移除（无 mask）
 
     saveState();
 
@@ -466,20 +456,15 @@ bool PetWindow::nativeEventFilter(const QByteArray &eventType, void *message, qi
 {
     MSG *msg = static_cast<MSG *>(message);
     if (msg->message == WM_NCHITTEST) {
-        // 只确认 HWND 属于 PetWindow 层级（不含其他非子窗口）
+        // 只确认 HWND 属于 PetWindow 层级
         if (msg->hwnd != reinterpret_cast<HWND>(winId())
             && !::IsChild(reinterpret_cast<HWND>(winId()), msg->hwnd)) {
             return false;
         }
 
-        // ◾ mask 外 → 由 SetWindowRgn 在 OS 级直接穿透，Windows 内核不递送消息
-        // ◾ mask 内 → 统一返回 HTCLIENT（不检查模型区域，不返回 HTTRANSPARENT）
-#ifdef QT_NO_DEBUG
-        // Release 构建：正常情况下不会看到 mask 外的 WM_NCHITTEST，
-        // 但某些 DWM 合成场景可能导致短暂的未屏蔽消息，直接放行。
-        // 不检查模型区域，避免与 setMask 的 OS 级穿透产生竞态。
-#endif
-        *result = HTCLIENT;
+        // ★ Phase 1: 全窗口穿透（HTTRANSPARENT），不拦截任何鼠标事件
+        //   PetWindow 只负责渲染，输入由 InputProxyWindow 处理
+        *result = HTTRANSPARENT;
         return true;
     }
     return false;
@@ -623,199 +608,41 @@ void PetWindow::updateSpeechBubblePosition()
 }
 
 // ============================================================================
-// 窗口 mask：稳定运动包络
-//
-// ◾ mask = 当前帧 Drawable 区域 ∪ 历史扩张包络 + 25px 额外边距
-// ◾ 扩张（模型超出当前 mask）→ 即时更新 | 收缩（模型变小）→ 延迟 2 秒
-// ◾ 动作期间 5Hz 轮询 (200ms)，超过 3px 变化才更新
-// ◾ 缓存上一帧 QRegion，未变化时禁止重复调用 setMask（避免 DWM 重排）
+// ★ Phase 1: 所有 mask 方法已临时移除
+// setMask/SetWindowRgn 同时裁剪 OpenGL 渲染输出 → 切换模型闪烁 + 持续运动裁剪
+// 移除后验证闪烁和裁剪是否消失，后续由 InputProxyWindow 独立负责输入穿透
 // ============================================================================
 
 void PetWindow::updateModelMask()
 {
-    if (!m_live2DView) { clearMaskAndCache(); return; }
-
-    // ── 1. 获取当前帧所有可见 Drawable 包围盒 ──
-    QElapsedTimer tTotal; tTotal.start();
-
-    QVector<QRect> drawableRects;
-    m_live2DView->getVisibleDrawableRects(drawableRects);
-
-    const qint64 tDrawUs = tTotal.nsecsElapsed() / 1000;
-
-    if (drawableRects.isEmpty()) { clearMaskAndCache(); return; }
-
-    // ── 2. 构建紧贴 QRegion + 25px 扩张 ──
-    QRegion tightRegion;
-    constexpr int kDrawablePad = 2;
-    for (const QRect &r : drawableRects) {
-        tightRegion = tightRegion.united(
-            QRegion(r.adjusted(-kDrawablePad, -kDrawablePad,
-                               +kDrawablePad, +kDrawablePad)));
-    }
-    tightRegion = tightRegion.intersected(QRect(0, 0, width(), height()));
-    if (tightRegion.isEmpty()) { clearMaskAndCache(); return; }
-
-    QRegion frameRegion = dilateRegion(tightRegion, kMaskDilationPx);
-    frameRegion = frameRegion.intersected(QRect(0, 0, width(), height()));
-    if (frameRegion.isEmpty()) { clearMaskAndCache(); return; }
-
-    QRect frameBounds = frameRegion.boundingRect();
-    const qint64 tBuildUs = tTotal.nsecsElapsed() / 1000 - tDrawUs;
-
-    // ── 3. 包络管理 ──
-    if (!m_hasCachedMask) {
-        // 首次 / 重置 → 直接用帧区域
-        applyMaskRegion(frameRegion, drawableRects.size());
-        m_envelopeRegion = frameRegion;
-        m_envelopeBounds = frameBounds;
-        m_envelopeStableTicks = 0;
-        m_maskActive = true;
-
-        qInfo().nospace()
-            << "[MaskTiming] first tDraw=" << tDrawUs << "us"
-            << " tBuild=" << tBuildUs << "us"
-            << " tSet=<first>"
-            << " drawable=" << drawableRects.size();
-        return;
-    }
-
-    // ── 3a. 扩张检测：新区域是否超出包络 >3px ──
-    const bool needsExpansion =
-        (frameBounds.left()   < m_envelopeBounds.left()   - 3) ||
-        (frameBounds.top()    < m_envelopeBounds.top()    - 3) ||
-        (frameBounds.right()  > m_envelopeBounds.right()  + 3) ||
-        (frameBounds.bottom() > m_envelopeBounds.bottom() + 3);
-
-    if (needsExpansion) {
-        // 合并到包络 → 即时更新 mask
-        QElapsedTimer tUnion; tUnion.start();
-        m_envelopeRegion = m_envelopeRegion.united(frameRegion);
-        m_envelopeBounds = m_envelopeRegion.boundingRect();
-        m_envelopeStableTicks = 0;
-        m_maskActive = true;
-        const qint64 tUnionUs = tUnion.nsecsElapsed() / 1000;
-
-        QElapsedTimer tSet; tSet.start();
-        applyMaskRegion(m_envelopeRegion, drawableRects.size());
-        const qint64 tSetUs = tSet.nsecsElapsed() / 1000;
-
-        qInfo().nospace()
-            << "[MaskTiming] expand tDraw=" << tDrawUs << "us"
-            << " tBuild=" << tBuildUs << "us"
-            << " tUnion=" << tUnionUs << "us"
-            << " tSet=" << tSetUs << "us"
-            << " env-rects=" << m_envelopeRegion.rectCount()
-            << " drawable=" << drawableRects.size();
-        return;
-    }
-
-    // ── 3b. 收缩检测：新区域是否明显小于包络 ──
-    const bool isSmaller =
-        (frameBounds.left()   > m_envelopeBounds.left()   + 3) ||
-        (frameBounds.top()    > m_envelopeBounds.top()    + 3) ||
-        (frameBounds.right()  < m_envelopeBounds.right()  - 3) ||
-        (frameBounds.bottom() < m_envelopeBounds.bottom() - 3);
-
-    if (isSmaller) {
-        m_envelopeStableTicks++;
-        if (m_envelopeStableTicks >= kMaskStableThreshold) {
-            // 稳定 2 秒 → 收缩到当前帧区域
-            QElapsedTimer tSet; tSet.start();
-            m_envelopeRegion = frameRegion;
-            m_envelopeBounds = frameBounds;
-            m_envelopeStableTicks = 0;
-            applyMaskRegion(frameRegion, drawableRects.size());
-            const qint64 tSetUs = tSet.nsecsElapsed() / 1000;
-
-            qInfo().nospace()
-                << "[MaskTiming] contract tDraw=" << tDrawUs << "us"
-                << " tBuild=" << tBuildUs << "us"
-                << " tSet=" << tSetUs << "us"
-                << " drawable=" << drawableRects.size();
-        }
-        // 收缩等待期不更新 mask
-        return;
-    }
-
-    // ── 3c. 无显著变化 ──
-    m_envelopeStableTicks++;
-    if (m_envelopeStableTicks >= kMaskStableThreshold * 2) {
-        // 4 秒完全稳定 → 停止轮询
-        m_maskActive = false;
-    }
-    // 不更新 mask
+    // Phase 1: 空实现 — 不再调用 clearMask/setMask
 }
 
 void PetWindow::clearMaskAndCache()
 {
-    clearMask();
-    m_cachedMask = QRegion();
-    m_cachedMaskBounds = QRect();
-    m_hasCachedMask = false;
+    // Phase 1: 空实现
 }
 
 void PetWindow::applyMaskRegion(const QRegion &region, int drawableCount)
 {
-    if (region.isEmpty()) { clearMaskAndCache(); return; }
-
-    // 防重复：区域完全相同时跳过（SetWindowRgn 代价高）
-    if (m_hasCachedMask && m_cachedMask == region) {
-        return;
-    }
-
-    if (region == QRegion(QRect(0, 0, width(), height()))) {
-        clearMask();
-        m_cachedMask = region;
-        m_cachedMaskBounds = region.boundingRect();
-        m_hasCachedMask = true;
-        return;
-    }
-
-    setMask(region);
-
-    m_maskGeneration++;
-    m_cachedMask = region;
-    m_cachedMaskBounds = region.boundingRect();
-    m_hasCachedMask = true;
-
-#ifdef Q_OS_WIN
-    HWND hwnd = reinterpret_cast<HWND>(effectiveWinId());
-    qInfo().nospace()
-        << "[Mask] v" << m_maskGeneration
-        << " HWND=" << Qt::hex << reinterpret_cast<quintptr>(hwnd) << Qt::dec
-        << " rects=" << region.rectCount()
-        << " bounds=" << m_cachedMaskBounds.x() << ","
-        << m_cachedMaskBounds.y() << " "
-        << m_cachedMaskBounds.width() << "x"
-        << m_cachedMaskBounds.height();
-#endif
-    // ⚠ setMask 内部调 SetWindowRgn → HRGN 所有权移交给 Windows，
-    //   禁止后续 DeleteObject(HRGN)
+    Q_UNUSED(region); Q_UNUSED(drawableCount);
+    // Phase 1: 空实现
 }
 
 QRegion PetWindow::dilateRegion(const QRegion &region, int px)
 {
-    if (region.isEmpty()) return region;
-    QRegion result;
-    for (const QRect &r : region) {
-        result = result.united(QRegion(r.adjusted(-px, -px, px, px)));
-    }
-    return result;
+    Q_UNUSED(px);
+    return region; // Phase 1: 直接返回原始区域
 }
 
 void PetWindow::onMaskTimer()
 {
-    // m_maskActive=false 且无强制 dirty 标记 → 跳过
-    if (!m_maskActive && !m_maskDirty) return;
-    m_maskDirty = false;
-    updateModelMask();
+    // Phase 1: 空实现 — 定时器仍存在但无操作
 }
 
 void PetWindow::markMaskDirty()
 {
-    m_maskDirty = true;
-    m_maskActive = true;
+    // Phase 1: 空实现
 }
 
 void PetWindow::setSpeechBubbleBgColor(const QColor &color)
@@ -1209,10 +1036,7 @@ void PetWindow::resizeEvent(QResizeEvent *event)
     if (m_live2DView) {
         m_live2DView->setGeometry(rect());
     }
-    m_hasCachedMask = false;
-    m_maskActive = true;
-    updateModelMask();
-    markMaskDirty();
+    // ★ Phase 1: mask 相关调用已移除
 }
 
 void PetWindow::paintEvent(QPaintEvent *event)

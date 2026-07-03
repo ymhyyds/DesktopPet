@@ -12,6 +12,7 @@ class WindowManager;
 class GlobalHotkeyManager;
 class PetWindow;
 class CharacterLoader;
+class InputProxyWindow;
 class DeepSeekClient;
 class PromptManager;
 class EmotionAnalyzer;
@@ -79,6 +80,7 @@ private:
 
     std::unique_ptr<WindowManager>     m_windowManager;
     std::unique_ptr<PetWindow>         m_petWindow;
+    std::unique_ptr<InputProxyWindow>  m_inputProxyWindow;
     std::unique_ptr<InteractionManager> m_interactionManager;
     std::unique_ptr<TrayManager>       m_trayManager;
     std::unique_ptr<ChatWindow>        m_chatWindow;

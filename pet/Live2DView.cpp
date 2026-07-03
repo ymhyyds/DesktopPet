@@ -1216,6 +1216,16 @@ bool Live2DView::isPointInModelArea(const QPoint &localPos) const
     return (px >= mx && px < mx + mw && py >= my && py < my + mh);
 }
 
+bool Live2DView::hitTestAt(float px, float py, bool &outIsHead) const
+{
+    return performHitTest(px, py, outIsHead);
+}
+
+bool Live2DView::alphaTestAt(float px, float py, unsigned char threshold)
+{
+    return checkPixelAlpha(px, py, threshold);
+}
+
 bool Live2DView::getModelPixelRect(float &outX0, float &outY0,
                                     float &outW, float &outH) const
 {

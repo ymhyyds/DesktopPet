@@ -1648,3 +1648,117 @@ fullscreenOverlayApplied   ← 覆盖应用状态（是否已 HWND_TOPMOST）
 | **InputProxyWindow（未来）** | 只做鼠标事件穿透/拦截决策，禁止涉及 OpenGL 渲染、Live2D 模块、HitTest 精细逻辑 |
 | **PetRenderWidget（未来）** | 只负责 OpenGL 渲染，禁止涉及鼠标穿透决策 |
 6. 模型动画中 tight bounds 变化时，mask 是否未及时更新
+
+---
+
+## 会话28/29 — 双窗口架构：PetWindow 纯渲染 + InputProxyWindow 输入代理（2026-07-03 ✅）
+
+### 问题
+
+1. **切换模型闪烁** — `setMask`/`SetWindowRgn` 同时裁剪 OpenGL 渲染输出，模型切换时 mask 不稳定导致闪烁
+2. **持续 Physics/Motion 裁剪** — 低频（5Hz）mask 对快速 Physics 摆动跟踪不及时，模型局部被裁剪
+
+### 根因
+
+**PetWindow 使用 `setMask` 同时影响了输入穿透和 OpenGL 渲染裁剪。** `SetWindowRgn` 是 OS 级的窗口区域裁剪，不仅决定鼠标输入区域，也控制哪些像素可见。即使低频（5Hz）更新，也会因为 mask 形状与当前帧模型轮廓不匹配而裁剪可见像素。
+
+### 方案：双窗口架构
+
+将"输入穿透"和"模型渲染"分离到两个独立顶层窗口：
+
+```
+Z-order（从上到下）:
+1. InputProxyWindow — 透明、QRegion mask、输入拦截
+2. PetWindow — Live2D 渲染、HTTRANSPARENT 全窗口穿透
+```
+
+#### PetWindow（渲染窗口）
+
+| 属性 | 值 |
+|------|-----|
+| mask | 不再使用（`updateModelMask` 等为无操作） |
+| 输入 | `nativeEventFilter` 返回 `HTTRANSPARENT`（全窗口穿透） |
+| 渲染 | Live2D / OpenGL 完整渲染，无裁剪 |
+| 鼠标事件 | 不再接收（InputProxyWindow 在 Z-order 上方拦截） |
+
+#### InputProxyWindow（输入代理窗口）— **新增文件**
+
+| 属性 | 值 |
+|------|-----|
+| 路径 | `interaction/InputProxyWindow.h` / `.cpp` |
+| 窗口属性 | `FramelessWindowHint \| WindowStaysOnTopHint \| Tool`，`WA_TranslucentBackground` |
+| 绘制内容 | 无（`paintEvent` 空） |
+| mask | 基于 `getModelPixelRect()` + 30px padding 构建 QRegion |
+| 鼠标事件 | mask 内接收 → 命中检测 → headClicked/BodyClicked；mask 外 → 系统穿透 |
+| 拖拽 | 自身实现，同时 `move()` PetWindow |
+| 右键 | 通过 `sendEvent` 转发到 PetWindow 的 `contextMenuEvent` |
+
+### 架构变化
+
+#### 鼠标事件流
+
+```
+旧架构:
+鼠标点击 → PetWindow (setMask 区域) → nativeEventFilter(HTCLIENT)
+                                                → PetWindow::mousePressEvent (拖拽)
+                                                → Live2DView::mousePressEvent (命中检测)
+                                                → InteractionManager (单击/双击/长按)
+
+新架构:
+鼠标点击 → InputProxyWindow (mask 区域)
+    ├─ mousePressEvent → Live2DView::hitTestAt + alphaTestAt → 记录 head/body
+    ├─ mouseReleaseEvent → head → PetWindow::triggerPet()
+    │                        body → Live2DView::playTapMotion()
+    ├─ InteractionManager (作为 eventFilter 安装在 InputProxyWindow 上)
+    │   → singleClicked / doubleClicked / longPressed / idleTimeout
+    └─ contextMenuEvent → sendEvent → PetWindow::contextMenuEvent
+```
+
+#### Live2DView 新增公共方法
+
+| 方法 | 说明 |
+|------|------|
+| `hitTestAt(float px, float py, bool &outIsHead)` | 公开命中检测（原私有 `performHitTest` 的包装） |
+| `alphaTestAt(float px, float py, uchar threshold)` | 公开 Alpha 检测（原私有 `checkPixelAlpha` 的包装） |
+
+### Phase 1 验证步骤
+
+1. 临时移除 PetWindow 所有 `setMask`/`clearMask` 调用
+2. 改为 `HTTRANSPARENT`（全窗口穿透）
+3. 确认模型切换不再闪烁、持续运动不再裁剪
+
+### Phase 2 实现
+
+| 文件 | 改动 |
+|------|------|
+| **`pet/PetWindow.h`** | mask 方法声明保留但标记 Phase 1 空实现；`triggerPet()` 由 private 改为 public |
+| **`pet/PetWindow.cpp`** | mask 方法全改为空实现；`nativeEventFilter` 返回 `HTTRANSPARENT`；移除构造中 mask 定时器；移除 resizeEvent/headClicked/modelLoaded 中的 mask 调用 |
+| **`pet/Live2DView.h`** | 新增 `hitTestAt()` / `alphaTestAt()` 公共声明 |
+| **`pet/Live2DView.cpp`** | 实现 `hitTestAt()` / `alphaTestAt()` 包装方法 |
+| **`interaction/InputProxyWindow.h`** | **新增** — 完整声明 |
+| **`interaction/InputProxyWindow.cpp`** | **新增** — 完整实现 |
+| **`core/App.h`** | 新增 `InputProxyWindow` 前置声明 + `m_inputProxyWindow` 成员 |
+| **`core/App.cpp`** | 创建 InputProxyWindow；InteractionManager 接在 InputProxyWindow 上；geometry 同步连接；Z-order 维护定时器（2秒间隔）；hotkey 隐藏/显示同步 |
+| **`CMakeLists.txt`** | 添加 `interaction/InputProxyWindow.cpp/.h` |
+
+### 当前已知问题
+
+1. **全屏覆盖 Z-order** — PetWindow 内部的 `applyFullscreenOverlay()` 调用 `SetWindowPos(HWND_TOPMOST)` 可能将 PetWindow 提升到 InputProxyWindow 之上，2秒 Z-order 定时器弥补此问题。
+2. Haru 模型切换闪退（未修复，session 15 之前已存在）
+3. modelScale=2.0 时纵向拉伸（未解决，session 10 已文档化）
+
+### 绝对不能改的部分（更新版）
+
+| 模块 | 约束 |
+|------|------|
+| Live2D 渲染 | `Live2DView` 渲染管线、`ModelController`、`Cubism SDK` |
+| 模型动作 | 动作加载、Idle 循环、Tap 动作、交叉淡入淡出 |
+| HitTest 精细逻辑 | `performHitTest`、`pixelToCanvas`、三层漏斗、Alpha 检测 |
+| InteractionManager | 双击/长按/挂机/单击分发（**已安装到 InputProxyWindow**） |
+| SpeechBubble | 气泡显示/淡出/定位 |
+| 浮动文字 | `FloatingTextWidget` 自绘制 |
+| 聊天气泡 | `ChatWindow` |
+| QA/睡眠提醒 | `setupBedtimeReminder`、深夜提醒 |
+| **InputProxyWindow** | 只做鼠标事件穿透/拦截决策，禁止涉及 OpenGL 渲染、Live2D 模块、HitTest 精细逻辑 |
+| **PetWindow** | **禁止再使用 setMask/SetWindowRgn**（全窗口 `HTTRANSPARENT`） |
+

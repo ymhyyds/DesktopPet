@@ -64,6 +64,9 @@ public:
     void saveState();
     void loadState();
 
+    /// 摸摸头动作 — InputProxyWindow 调用
+    void triggerPet();
+
     // 动画安全边距比率 — 被 PetWindow/ModelController/Live2DView 共享使用
     static constexpr double kAnimMarginRatio = 0.01;
 
@@ -94,7 +97,6 @@ private:
     static FeedPeriod currentFeedPeriod();
     void allocateFeedValues();
     void resetFeedCycleIfNeeded();
-    void triggerPet();
 
 private:
     Live2DView       *m_live2DView       = nullptr;
@@ -149,29 +151,15 @@ private:
     int     m_fullscreenConfirmCount     = 0;
     QTimer *m_fullscreenCheckTimer       = nullptr;
 
-    // ──── 智能穿透 mask 管理 ────
+    // ╔══════════════════════════════════════════════════════════════════════╗
+    // ║  Phase 1 验证：所有 mask 方法已改为空实现                         ║
+    // ║  setMask/SetWindowRgn 导致：切换模型闪烁 + 持续运动裁剪           ║
+    // ║  移除后验证闪烁和裁剪是否消失，后续 InputProxyWindow 替代         ║
+    // ╚══════════════════════════════════════════════════════════════════════╝
     void updateModelMask();
     void markMaskDirty();
     void clearMaskAndCache();
     void applyMaskRegion(const QRegion &region, int drawableCount);
     QRegion dilateRegion(const QRegion &region, int px);
     void onMaskTimer();
-
-    int     m_maskGeneration = 0;
-    bool    m_maskDirty      = false;
-    QTimer *m_maskTimer      = nullptr;
-
-    // 稳定运动包络（缓存 + 扩张即时 + 收缩延迟）
-    QRegion m_cachedMask;           // 最后成功设置的 mask（防重复 setMask）
-    QRect   m_cachedMaskBounds;     // 快速比较用
-    bool    m_hasCachedMask = false;
-
-    QRegion m_envelopeRegion;       // 扩张包络（当前 ∪ 最近若干帧 dilated）
-    QRect   m_envelopeBounds;       // 包络边界框
-    int     m_envelopeStableTicks = 0;
-    bool    m_maskActive = false;   // true=动作期间，启用 5Hz 轮询
-
-    static constexpr int kMaskDilationPx     = 25;
-    static constexpr int kMaskPollIntervalMs = 200;   // 5Hz
-    static constexpr int kMaskStableThreshold = 10;    // 200ms × 10 = 2秒
 };
