@@ -1747,7 +1747,94 @@ Z-order（从上到下）:
 2. Haru 模型切换闪退（未修复，session 15 之前已存在）
 3. modelScale=2.0 时纵向拉伸（未解决，session 10 已文档化）
 
-### 绝对不能改的部分（更新版）
+---
+
+## 会话30 — 双窗口实际测试：闪烁/裁剪已修复，但完全无法点击（2026-07-03）
+
+### 实际情况
+
+| 症状 | 结果 |
+|------|------|
+| 切换模型闪烁 | ✅ 已修复（mask 不再裁剪 OpenGL） |
+| 持续运动裁剪 | ✅ 已修复 |
+| **点击、双击、拖拽** | ❌ **完全无反应** |
+| 右键菜单 | ❌ 无反应 |
+
+所有鼠标事件均无法到达任何窗口组件。
+
+### 高概率原因排查
+
+```
+1. InputProxyWindow 未收到鼠标事件
+   └─ 窗口透明+无内容 → OS 可能直接穿透？
+2. 窗口 alpha=0 导致系统直接穿透
+   └─ WA_TranslucentBackground → 窗口完全透明 → WM_NCHITTEST 返回 HTTRANSPARENT？
+3. InputProxyWindow 位于 PetWindow 下方
+   └─ 看起来 inputProxy 在 PetWindow 之上，但需确认
+4. mask 为空或坐标错误
+   └─ getModelPixelRect 在模型加载前返回 false → mask 被 clear
+5. 事件未正确转发给 InteractionManager
+   └─ InteractionManager 安装在 InputProxyWindow 上
+   └─ 但 eventFilter 永远不吞事件 → 返回 QObject::eventFilter
+   └─ 原生事件流未到达 InputProxyWindow
+6. 顶层窗口 Qt::Tool 行为不接收鼠标
+   └─ Qt::Tool 窗口可能在某些条件下不接收鼠标
+```
+
+### 重点检查方向
+
+**方向 A：InputProxyWindow 根本收不到鼠标事件**
+- 创建时 `WA_TranslucentBackground` 且 `paintEvent` 空 → 窗口完全透明无内容
+- 透明窗口在 Windows 上鼠标穿透行为？
+- `Qt::Tool` 标志影响鼠标接收？
+- 尝试在 InputProxyWindow 上画一个半透明色块验证鼠标是否能到达
+
+**方向 B：mask 未正确设置**
+- 模型加载时序：`modelLoaded` 信号 → App 调用 `updateInputMask` → 但此时模型刚加载，`getModelPixelRect` 可能返回 false？
+- 首次加载时 `m_tightWidth/Height` 从 T-pose 读取，可能为 0？
+- 500ms 后 `stableBoundsReady` 才真正有 tight bounds
+
+**方向 C：Z-order 反转**
+- PetWindow 先 show，InputProxyWindow 后 show
+- 但 PetWindow 的 `WA_TranslucentBackground` + `HTTRANSPARENT` 无法接收事件
+- InputProxyWindow 虽然后 show 可能在 Z-order 上方，但透明窗口可能不受系统鼠标事件分发
+
+### 本轮修改文件（已全部提交 commit 8bc6c36）
+
+| 文件 | 改动 |
+|------|------|
+| `pet/PetWindow.h` | mask 方法保留但空实现；`triggerPet()` 改 public |
+| `pet/PetWindow.cpp` | mask 全空实现；`nativeEventFilter` → `HTTRANSPARENT` |
+| `pet/Live2DView.h` | 新增 `hitTestAt()` / `alphaTestAt()` |
+| `pet/Live2DView.cpp` | 实现上述包装方法 |
+| `interaction/InputProxyWindow.h` | **新增** |
+| `interaction/InputProxyWindow.cpp` | **新增** |
+| `core/App.h` | 新增 `m_inputProxyWindow` |
+| `core/App.cpp` | 创建 InputProxyWindow；重连 InteractionManager；同步逻辑 |
+| `CMakeLists.txt` | 添加 InputProxyWindow 源文件 |
+| `PROJECT_CONTEXT.md` | 本轮文档更新 |
+
+### 当前 git 状态
+
+```
+8bc6c36 (HEAD -> master) dual-window: PetWindow pure render + InputProxyWindow input proxy
+a4ab530 checkpoint: mask click-through before input proxy window
+8dcebdc checkpoint: mask click-through before input proxy window
+```
+无未提交改动。
+
+### 下一步
+
+**只排查 InputProxyWindow 输入链路**，不修改 Live2D / Physics / Motion / ModelController / InteractionManager / 浮动文字 / 聊天气泡。
+
+排查思路：
+1. 验证 InputProxyWindow 是否能收到 `WM_NCHITTEST` 和鼠标事件
+2. 在 `mousePressEvent` 加 `qInfo()` 日志确认触发
+3. 检查 `getModelPixelRect()` 在模型刚加载时的返回值
+4. 检查 `WA_TranslucentBackground` + `Qt::Tool` 是否阻止鼠标接收
+5. 尝试在 InputProxyWindow `paintEvent` 中画半透明色块，确认窗口位置和大小正确
+
+### 绝对不能修改
 
 | 模块 | 约束 |
 |------|------|
