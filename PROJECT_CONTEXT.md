@@ -1849,3 +1849,292 @@ a4ab530 checkpoint: mask click-through before input proxy window
 | **InputProxyWindow** | 只做鼠标事件穿透/拦截决策，禁止涉及 OpenGL 渲染、Live2D 模块、HitTest 精细逻辑 |
 | **PetWindow** | **禁止再使用 setMask/SetWindowRgn**（全窗口 `HTTRANSPARENT`） |
 
+
+
+---
+
+## 会话31 — 双窗口 Phase A 调试：InputProxyWindow 输入链路（2026-07-03 进行中）
+
+### 已完成的双窗口方案
+
+| 窗口 | 职责 | 关键属性 |
+|------|------|---------|
+| **PetWindow**（底层） | 完整 Live2D 渲染，无 mask 裁剪 | `nativeEventFilter` → `HTTRANSPARENT` 全窗口穿透；所有 mask 方法 Phase 1 空实现 |
+| **InputProxyWindow**（顶层） | 智能穿透 + 鼠标输入 | `FramelessWindowHint \| WindowStaysOnTopHint \| Tool`；`WA_TranslucentBackground`；`setMask(QRegion)`；自实现 mousePress/Move/Release/Drag/ContextMenu；`InteractionManager` eventFilter 安装在此 |
+
+### 已解决的问题
+
+| 问题 | 状态 |
+|------|------|
+| 切换模型闪烁（mask 裁剪 OpenGL） | ✅ 修复（PetWindow 不再 setMask） |
+| Physics 持续运动裁剪 | ✅ 修复 |
+| mask 更新导致的掉帧 | ✅ 修复 |
+
+### 当前问题：完全无法点击
+
+所有鼠标事件（单击、双击、拖拽、右键）均无法到达任何窗口组件。
+
+### Phase A 调试发现
+
+**2026-07-03 诊断结论：**
+
+1. **`WS_EX_LAYERED` 阻断鼠标事件** — 无论使用 `WA_TranslucentBackground`（`UpdateLayeredWindow` per-pixel alpha）还是 `setWindowOpacity`（`SetLayeredWindowAttributes` 均匀 alpha），只要窗口具有 `WS_EX_LAYERED` 样式，Windows 就拒绝交付鼠标事件。测试了 alpha=1、alpha=30、alpha=0.01 均无效。
+
+2. **无 Layered + `setMask` → 鼠标事件正常** — 移除 `WA_TranslucentBackground`、使用 `setMask(QRegion)` 裁剪可见/输入区域后，`mousePressEvent`/`mouseMoveEvent`/`mouseReleaseEvent` 全部正常到达，拖拽工作正常。`hitTestAt` 返回正确的 head/body 分类。
+
+3. **关键矛盾**：无 Layered 时 mask 区域内的像素完全不透明（遮挡 PetWindow 渲染），有 Layered 时 Windows 丢弃鼠标事件。
+
+4. **未验证的假设**：`WA_TranslucentBackground` + `setMask` + mask 区域内 **alpha=255 完全不透明内容** 是否能同时满足「透明可见 PetWindow 渲染」和「接收鼠标事件」尚未验证。
+
+### 下一步计划（Phase A）
+
+| 步骤 | 内容 |
+|------|------|
+| 1 | 确认 InputProxyWindow 可见、启用、位于 PetWindow 上方 |
+| 2 | 确认没有设置 `WindowTransparentForInput`/`WA_TransparentForMouseEvents`/`WS_EX_TRANSPARENT` |
+| 3 | 检查 mask 是否为空、geometry 是否与 PetWindow 一致 |
+| 4 | 在 press/move/release/doubleClick 中增加临时文件日志 |
+| 5 | 用整窗 mask + 可见半透明背景验证是否能收到原始鼠标事件 |
+| 6 | 能收到后，检查坐标转换和转发到现有 InteractionManager |
+| 7 | 恢复模型区域 mask，背景改为肉眼不可见但非零 alpha |
+
+### 绝对不能修改
+
+| 模块 | 约束 |
+|------|------|
+| Live2D 渲染 | `Live2DView` 渲染管线、`ModelController`、`Cubism SDK` |
+| 模型动作 | 动作加载、Idle 循环、Tap 动作、交叉淡入淡出 |
+| HitTest 精细逻辑 | `performHitTest`、`pixelToCanvas`、三层漏斗、Alpha 检测 |
+| InteractionManager | 双击/长按/挂机/单击分发（**已安装到 InputProxyWindow**） |
+| SpeechBubble | 气泡显示/淡出/定位 |
+| 浮动文字 | `FloatingTextWidget` 自绘制 |
+| 聊天气泡 | `ChatWindow` |
+| QA/睡眠提醒 | `setupBedtimeReminder`、深夜提醒 |
+
+---
+
+## 会话33 — 双窗口智能穿透完成 + 固定半窗验证（2026-07-03）
+
+### 双窗口穿透方案（已完成）
+
+| 窗口 | 职责 | 关键属性 |
+|------|------|---------|
+| **PetWindow**（下层） | 仅 Live2D 渲染，**永久输入穿透** | `FramelessWindowHint \| WindowStaysOnTopHint \| Tool \| WindowTransparentForInput`；`WA_TranslucentBackground`；`nativeEventFilter` → `HTTRANSPARENT`；无 mask；**无** mousePress/Move/Release 重写 |
+| **InputProxyWindow**（上层） | 所有鼠标交互 + 模型区域 mask（待恢复） | `FramelessWindowHint \| WindowStaysOnTopHint \| Tool`；`WA_TranslucentBackground`；固定左半 mask `QRegion(0, 0, width()/2, height())`（测试中，待恢复模型区域 mask） |
+
+### 验证通过的事件映射
+
+| 操作 | 行为 | 状态 |
+|------|------|------|
+| 左键头部 | `hitTestAt(isHead=true)` → `triggerPet()` + 浮动文字 | ✅ |
+| 左键身体 | `hitTestAt(isHead=false)` → `playTapMotion()` | ✅ |
+| 右键头部/身体 | 转发到 PetWindow → 右键菜单 | ✅ |
+| 模型外（左半非命中） | 不触发交互（事件被 InputProxyWindow mask 消费） | ✅ |
+| 右半边（mask 外） | 自动穿透 → PetWindow（WindowTransparentForInput）→ 桌面 | ✅ |
+
+### 已完成的清理
+
+| 项 | 状态 |
+|----|------|
+| PetWindow `WindowTransparentForInput` | ✅ 构造时永久设置 |
+| PetWindow mousePressEvent 拖拽代码 | ✅ 移除 |
+| PetWindow `m_dragging`、`m_dragStartOffset` | ✅ 移除 |
+| PetWindow `dragFinished()` signal | ✅ 移除 |
+| PetWindow nativeEventFilter HTTRANSPARENT | ✅ 保留（双重穿透保障） |
+| InputProxyWindow WM_NCHITTEST 过滤 | ❌ 未启用（半窗测试不安装） |
+
+### 当前已知问题
+
+1. **部分模型浮动文字位置偏下** — 某些模型（非全部）的浮动文字 Y 坐标异常。
+2. **部分模型窗口宽高比异常** — 透明空白过多，模型在窗口中过小；正常模型无此问题。
+3. **模型间行为不一致** — 同一下层架构，不同模型表现不同。
+
+### 高概率排查方向
+
+- Head/Face HitArea 定义差异（`model3.json`）
+- visible drawable bounds 差异
+- `CanvasWidth` / `CanvasHeight` / `PixelsPerUnit` 差异
+- `model3.json` Layout 设置
+- 历史 `savedScale` / window geometry / `modelOffset` / `bubbleOffset` 缓存
+- 模型切换后旧 bounds 或 anchor 缓存未清理
+
+### 下一步
+
+只排查模型差异，不修改智能穿透和输入链路。
+
+### 绝对不能修改
+
+| 模块 | 约束 |
+|------|------|
+| PetWindow `WindowTransparentForInput` | 永久输入穿透，不可取消 |
+| InputProxyWindow 事件转发 | 事件映射已验证通过，不可修改 |
+| 智能穿透结构 | 双窗口分离方案已锁定 |
+| 左右键交互映射 | 左键 head/body 区别 + 右键菜单 |
+| InteractionManager | 双击/长按/挂机/单击分发逻辑 |
+| Physics / Motion / deltaTime | 物理引擎和动作系统 |
+| 浮动文字 offsetY + alpha 动画 | `FloatingTextWidget` 动画实现 |
+| 文字字体、字号、颜色和样式 | UI 风格不可修改 |
+
+---
+
+## 会话34 — 诊断日志 + 模型尺寸/浮动文字锚点对比分析（2026-07-03）
+
+### 已加入的纯诊断日志
+
+在 `Live2DView` 和 `PetWindow` 中添加了三类日志，**仅写入文件，不修改几何/窗口尺寸/浮动文字逻辑**：
+
+| 日志前缀 | 触发时机 | 主要内容 |
+|---------|---------|---------|
+| `[resize]` | 模型加载完成、窗口 resize、模型缩放变化 | model, scale, basePx, aspect, CanvasW/H, PixelsPerUnit, tightW/H, modelW/H, expected/actual window, PetWindow/Live2DView geometry, visible drawable aggregate bounds |
+| `[anchor]` | 模型切换后立即记录；锚点数值变化>5px 时记录；限频 ≤1Hz | model, source (Head/Body/TightBounds/Fallback), headTopY, headCenterX, modelPixelHeight, window, canvas, ppu, headAreas AABB, bodyAreas AABB |
+| `[floatText]` | 每次 `showFloatingText()` 计算最终位置后 | model, anchorSrc, localAnchor, globalAnchor, offset, modelPxH, widgetSize, finalPos |
+
+日志文件路径为 `build/Release/live2d_debug_log.txt`，程序启动时 `qInfo()` 输出绝对路径。每次启动自动清空旧内容。
+
+限频策略：`[anchor]` 每秒最多写 1 次；`[resize]` 和 `[floatText]` 事件驱动，不重复写入。
+
+### 异常模型诊断数据（纳西妲l2d）
+
+当前运行的唯一模型为 `纳西妲l2d`（纳西妲），数据如下：
+
+| 字段 | 值 |
+|------|-----|
+| CanvasWidth / CanvasHeight | **1×1**（方形的画布） |
+| PixelsPerUnit | **781** |
+| modelScale | **6.22**（来自上次会话 QSettings 持久化遗留值） |
+| 窗口尺寸 | 797×1268 |
+| PetWindow global position | (1003, 0) |
+| tightW/tightH | 0.438×0.697 |
+| headTopY (pixel) | **475~495px**（在 1268px 窗口中约 37%~39% 位置） |
+| 锚点来源 | Head HitArea（实际来自 Priority2 drawable 名称匹配 "face"） |
+| headAreas AABB (canvas) | ~(-0.056, 0.113) to (-0.007, 0.191) |
+| bodyAreas AABB (canvas) | ~(0.016, 0.032) to (0.092, 0.089) |
+| visible drawable aggregate | (278, 432) 343×504 |
+| 浮动文字最终 global pos | (1347, 382) |
+| 浮动文字 widget local pos | ~(344, 382) |
+| 文字 offset | 35.4px（= modelPixelH 544.9 × 0.065） |
+| 文字 widget 尺寸 | 50×58 |
+
+### 当前两个主要怀疑
+
+1. **历史 scale=6.22**：QSettings 全局共享 modelScale，切换模型后不重置。scale=6.22 导致 basePx=1244，窗口 797×1268（基本全屏高度）。模型在该窗口中的占比与实际视觉预期不符。
+
+2. **"face" drawable AABB**：纳西妲的 `"头"` HitArea 在 Priority1 中因名称 `"头"` 不在 `kHeadHitAreaNames` 白名单而未匹配头部。Priority2 通过 drawable 名称 `"face"` 匹配，但 face drawable 的 tight bounds 可能**不等于真实视觉头顶**（头发/装饰高于 face bound）。此时浮动文字锚点 `headTopY` 低于实际头顶，导致浮动文字偏下。
+
+### 下一步
+
+- 在新会话中采集一个正常模型（如 Mao 或 Hiyori）的同类日志
+- 对比 scale、visible bounds、Head/Face bounds、窗口期望尺寸和实际尺寸
+- 再决定是迁移旧 scale 配置，还是修正 Head drawable 选择
+
+### 绝对不能修改
+
+| 模块 | 约束 |
+|------|------|
+| PetWindow `WindowTransparentForInput` | 永久输入穿透，不可取消 |
+| InputProxyWindow 事件转发 | 事件映射已验证通过，不可修改 |
+| 智能穿透结构 | 双窗口分离方案已锁定 |
+| 左右键交互映射 | 左键 head/body 区别 + 右键菜单 |
+| InteractionManager | 双击/长按/挂机/单击分发逻辑 |
+| Physics / Motion / deltaTime | 物理引擎和动作系统 |
+| 浮动文字 offsetY + alpha 动画 | `FloatingTextWidget` 动画实现 |
+| 文字字体、字号、颜色和样式 | UI 风格不可修改 |
+| 窗口尺寸计算 | `applyTightSize()`、`modelH=basePx` 算法 |
+| 浮动文字定位公式 | `headTopY - offset - widgetHeight` + `offset=modelPixelHeight×0.065` |
+| Head Anchor 计算 | `computeAndCacheHeadAnchor()` / `computeModelArea()` Canvas→Pixel 映射<br>注意：Body-only 回退分支（可见 drawable 扫描）已在会话35 中修改 |
+
+## 会话35 — Hiyori 浮动文字下移修复：Body-only 可见 drawable 扫描（2026-07-03）
+
+### 问题发现
+
+会话34 最初怀疑纳西妲l2d 异常，对照 xiaoyue 和 Wanko 后才发现真正有问题是 **Hiyori**：
+
+| 模型 | headTopY | 可见区顶部 | 文字与可见区间隙 | 表现 |
+|------|----------|-----------|-----------------|------|
+| 纳西妲l2d | ~485 | ~432 | 仅重叠 8px | ✅ 正常 |
+| xiaoyue | ~106 | — | 远在可见区上方 | ✅ 正常 |
+| Wanko | ~488 | ~488 | 上方 77px | ✅ 正常 |
+| **Hiyori** | **~510** | **~430** | **重叠 52px** | ❌ 文字压在角色上 |
+
+### 根因确认
+
+1. **Hiyori 没有 Head HitArea** — model3.json 只定义了 `{"Name":"Body","Id":"HitArea"}`。
+2. 旧代码进入 `else if (hasBody)` 分支，直接使用 `bodyMaxY` 作为 `anchorMaxY`。
+3. Hiyori 的 "HitArea" drawable 只覆盖**躯干**（body=(-0.174,-0.131)-(0.174,0.367)），不含头部。
+4. 实际视觉顶部（tight top=0.603，visible drawable top=430px）远高于 body 顶部（0.367）。
+5. 导致 headTopY=509.9，浮动文字 global Y=424，与可见区顶部 430 重叠 52px。
+
+### 已实施的最小修复
+
+**修改文件：** `pet/Live2DView.cpp` — `computeAndCacheHeadAnchor()` 的 `else if (hasBody)` 分支
+
+**策略：** 当有 Body HitArea 但无 Head HitArea 时：
+
+1. **保留** bodyMinX/bodyMaxX 用于水平中心和水平范围。
+2. **不再直接使用** bodyMaxY 作为头顶锚点。
+3. 扫描可见 drawable（仅 visible + opacity ≥ 0.01）：
+   - 水平范围：body 宽度 × 0.25 扩展各侧（共 50% 展宽）
+   - 排除覆盖超过 80% 画布的大网格 drawable
+   - 在范围内取最高 drawable 的 maxY 作为 candidateMaxY
+4. 最终锚点：`anchorMaxY = max(bodyMaxY, candidateMaxY)`
+5. 无有效候选时回退 bodyMaxY（anchorSource=`BodyFallback`）。
+
+**影响范围：**
+
+| 模型 | hasHead | hasBody | 旧行为 | 新行为 | 变化 |
+|------|---------|---------|--------|--------|------|
+| Nahida | ✅ | — | Head HitArea | Head HitArea | **不变** |
+| xiaoyue | ❌ | ❌ | Tight Bounds | Tight Bounds | **不变** |
+| Wanko | ❌ | ✅ | bodyMaxY=0.134 | 扫描到相同高度（BodyFallback） | **≈不变** |
+| Hiyori | ❌ | ✅ | bodyMaxY=0.367 | candidateMaxY≈0.603（BodyVisualTop） | **headTopY 510→362** |
+
+### 验证结果
+
+实测 Hiyori → 纳西妲l2d → xiaoyue → Wanko 顺序验证（2026-07-03）：
+
+| 模型 | anchorSource | 最终 headTopY | 浮动文字位置 | 表现 |
+|:----:|:------------:|:-------------:|:------------:|:----:|
+| **Hiyori** | BodyVisualTop | 432.8px | (1647, 344) | ✅ 头顶位置正确，修复生效 |
+| **纳西妲l2d** | Head HitArea | ~456~475px | (1402, 364) | ✅ 保持不变，正常 |
+| **xiaoyue** | Tight Bounds | 114.4px | (1011, 204) | ✅ 保持不变，正常 |
+| **Wanko** | BodyFallback | 490.1px | (1351, 356) | ✅ 无副作用，bodyMaxY 已覆盖头部 |
+
+**浮动文字公式验证**（4/4 通过）：
+```
+finalY = headTopY - offset - widgetHeight
+offset = modelPixelHeight × 0.065
+```
+所有模型的 global Y 坐标偏差 ≤1px。无回归。
+
+### 日志清理
+
+高频诊断日志已移除：
+- `[anchor-scan]` qDebug（逐候选 drawable 日志）
+- `logHeadAnchorDiagnostic()` 每帧调用和限频锚点日志
+- `m_prevAnchorLog` / `m_modelJustLoaded` 诊断状态
+
+保留一条低频摘要日志（`[anchor]`），仅在模型加载或切换时输出一次 modelName、source、headTopY。
+
+### 修改文件
+
+```
+pet/Live2DView.cpp   — computeAndCacheHeadAnchor() hasBody 分支 + writeAnchorSummaryLog()
+pet/Live2DView.h     — 添加 m_needsAnchorLog / m_lastAnchorSource，移除诊断成员
+PROJECT_CONTEXT.md   — 本会话记录
+```
+
+### 绝对不能修改
+
+| 模块 | 约束 |
+|------|------|
+| PetWindow `WindowTransparentForInput` | 永久输入穿透，不可取消 |
+| InputProxyWindow 事件转发 | 事件映射已验证通过，不可修改 |
+| 智能穿透结构 | 双窗口分离方案已锁定 |
+| 左右键交互映射 | 左键 head/body 区别 + 右键菜单 |
+| InteractionManager | 双击/长按/挂机/单击分发逻辑 |
+| Physics / Motion / deltaTime | 物理引擎和动作系统 |
+| 浮动文字 offsetY + alpha 动画 | `FloatingTextWidget` 动画实现 |
+| 文字字体、字号、颜色和样式 | UI 风格不可修改 |
+| 窗口尺寸计算 | `applyTightSize()`、`modelH=basePx` 算法 |
+| 浮动文字定位公式 | `headTopY - offset - widgetHeight` + `offset=modelPixelHeight×0.065` |
+| Head Anchor 计算（Head HitArea / Tight Bounds 分支） | 已锁定；仅 Body-only 回退分支在会话35 被修正 |

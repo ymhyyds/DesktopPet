@@ -467,6 +467,10 @@ void Live2DView::loadPendingModelIfNeeded()
 
     setStatusMessage(QString()); // 成功 → 清空状态信息，不再显示覆盖层
 
+    // 置标志：下次 computeAndCacheHeadAnchor 后写一次锚点摘要日志
+    m_needsAnchorLog = true;
+    m_lastAnchorSource.clear();
+
     // ★ 等 idle 动画启动后重新读取包围盒（500ms 足够 idle 开始播放）
     //    初始姿态（T-pose）的包围盒偏大，idle 动画播放后更接近实际视觉大小。
     //    切换角色时也会重新触发此延迟，每个角色都用自己的稳定包围盒。
@@ -622,6 +626,10 @@ void Live2DView::paintGL()
             // ★ 每帧更新头部锚点缓存（供浮动文字实时跟踪，零额外开销）
             //    getInteractionAreas 遍历 drawable 的成本已融入渲染帧，不额外占事件循环
             computeAndCacheHeadAnchor();
+
+            // ★ 模型加载/切换后写一次锚点摘要日志
+            if (m_needsAnchorLog)
+                writeAnchorSummaryLog();
 
             GLint drawFboAfter = 0, readFboAfter = 0;
             glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &drawFboAfter);
@@ -1017,6 +1025,7 @@ void Live2DView::computeAndCacheHeadAnchor()
         bool anchorValid = false;
 
         if (hasHead) {
+            m_lastAnchorSource = QStringLiteral("Head HitArea");
             anchorMinX = headAreas[0].minX;
             anchorMaxX = headAreas[0].maxX;
             anchorMaxY = headAreas[0].maxY;
@@ -1029,17 +1038,74 @@ void Live2DView::computeAndCacheHeadAnchor()
         } else if (hasBody) {
             float bodyMinX = bodyAreas[0].minX;
             float bodyMaxX = bodyAreas[0].maxX;
-            float bodyMinY = bodyAreas[0].minY;
             float bodyMaxY = bodyAreas[0].maxY;
             for (int i = 1; i < bodyAreas.size(); i++) {
                 if (bodyAreas[i].minX < bodyMinX) bodyMinX = bodyAreas[i].minX;
                 if (bodyAreas[i].maxX > bodyMaxX) bodyMaxX = bodyAreas[i].maxX;
-                if (bodyAreas[i].minY < bodyMinY) bodyMinY = bodyAreas[i].minY;
                 if (bodyAreas[i].maxY > bodyMaxY) bodyMaxY = bodyAreas[i].maxY;
             }
             anchorMinX = bodyMinX;
             anchorMaxX = bodyMaxX;
-            anchorMaxY = bodyMaxY;
+
+            // ── Body-only fallback: scan visible drawables for visual head top ──
+            // Body HitArea may not cover the head (e.g. Hiyori's "HitArea" drawable
+            // only spans the torso).  Scan visible drawables within the body's
+            // horizontal range (expanded 25 % each side) to find the actual
+            // topmost visual element.  Oversized full-canvas drawables are
+            // excluded so they cannot pull the anchor upward.
+            {
+                const float bodyW = bodyMaxX - bodyMinX;
+                const float xLo = bodyMinX - bodyW * 0.25f;
+                const float xHi = bodyMaxX + bodyW * 0.25f;
+                float candidateMaxY = bodyMaxY;
+                QStringList candidateNames;
+
+                if (auto *rawModel = m_model ? m_model->GetModel() : nullptr) {
+                    const int dc = rawModel->GetDrawableCount();
+                    for (int d = 0; d < dc; d++) {
+                        if (!rawModel->GetDrawableDynamicFlagIsVisible(d)) continue;
+                        if (rawModel->GetDrawableOpacity(d) < 0.01f) continue;
+
+                        const auto *verts = rawModel->GetDrawableVertexPositions(d);
+                        const int vc = rawModel->GetDrawableVertexCount(d);
+                        if (vc < 3) continue;
+
+                        float dMinX = verts[0].X, dMaxX = verts[0].X;
+                        float dMinY = verts[0].Y, dMaxY = verts[0].Y;
+                        for (int v = 1; v < vc; v++) {
+                            if (verts[v].X < dMinX) dMinX = verts[v].X;
+                            if (verts[v].X > dMaxX) dMaxX = verts[v].X;
+                            if (verts[v].Y < dMinY) dMinY = verts[v].Y;
+                            if (verts[v].Y > dMaxY) dMaxY = verts[v].Y;
+                        }
+
+                        // Gate: must overlap with expanded body X range
+                        if (dMaxX < xLo || dMinX > xHi) continue;
+
+                        // Exclude oversized full-canvas drawables
+                        const float dW = dMaxX - dMinX;
+                        const float dH = dMaxY - dMinY;
+                        if (dW > m_canvasWidth * 0.8 && dH > m_canvasHeight * 0.8)
+                            continue;
+
+                        if (dMaxY > candidateMaxY) {
+                            candidateMaxY = dMaxY;
+                            const auto *id = rawModel->GetDrawableId(d);
+                            if (id)
+                                candidateNames << QString::fromUtf8(
+                                                   id->GetString().GetRawString());
+                        }
+                    }
+                }
+
+                if (candidateMaxY > bodyMaxY) {
+                    anchorMaxY = candidateMaxY;
+                    m_lastAnchorSource = QStringLiteral("BodyVisualTop");
+                } else {
+                    anchorMaxY = bodyMaxY;
+                    m_lastAnchorSource = QStringLiteral("BodyFallback");
+                }
+            }
             anchorValid = true;
         }
 
@@ -1079,6 +1145,7 @@ void Live2DView::computeAndCacheHeadAnchor()
     // ── Layer 3: Tight bounds fallback ──
     float mx = 0.0f, my = 0.0f, mw = 0.0f, mh = 0.0f;
     if (computeModelArea(mx, my, mw, mh) && mh > 0.0f) {
+        m_lastAnchorSource = QStringLiteral("Tight Bounds");
         m_cachedHeadCenterX = mx + mw * 0.5f;
         m_cachedHeadTopY = my;
         m_cachedModelPixelHeight = mh;
@@ -1086,9 +1153,38 @@ void Live2DView::computeAndCacheHeadAnchor()
     }
 
     // ── Ultimate fallback: window center top ──
+    m_lastAnchorSource = QStringLiteral("Window Top Fallback");
     m_cachedHeadCenterX = static_cast<float>(width()) * 0.5f;
     m_cachedHeadTopY = 0.0f;
     m_cachedModelPixelHeight = static_cast<float>(height());
+}
+
+// ============================================================================
+// 摘要日志：模型加载/切换时写一次锚点信息
+// ============================================================================
+
+void Live2DView::writeAnchorSummaryLog()
+{
+    if (!m_needsAnchorLog) return;
+    m_needsAnchorLog = false;
+
+    // 模型名：取目录末尾
+    QString modelName = m_modelDirectory;
+    {
+        int idx = modelName.lastIndexOf(QLatin1Char('/'), -2);
+        if (idx >= 0) modelName = modelName.mid(idx + 1);
+        if (modelName.endsWith(QLatin1Char('/'))) modelName.chop(1);
+    }
+
+    QFile f(QStringLiteral("live2d_debug_log.txt"));
+    if (f.open(QIODevice::Append | QIODevice::Text)) {
+        QTextStream s(&f);
+        s << QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz"))
+          << " [anchor] model=" << modelName
+          << " source=" << m_lastAnchorSource
+          << " headTopY=" << QString::number(m_cachedHeadTopY, 'f', 1)
+          << "\n";
+    }
 }
 
 // ============================================================================

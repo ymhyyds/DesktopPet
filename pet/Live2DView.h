@@ -80,7 +80,7 @@ public:
     void getVisibleDrawableRects(QVector<QRect> &outRects) const;
 
     /// 获取模型头部锚点（窗口局部像素坐标）
-    /// 优先级：Head HitArea 顶部中心 → Body-only 头部区域（35% 分割）顶部中心 → tight bounds 顶部中心
+    /// 优先级：Head HitArea 顶部中心 → Body HitArea 水平范围 + visible drawable 扫描顶部 → tight bounds 顶部中心
     /// @param[out] headCenterX 头部中心 X（窗口局部像素）
     /// @param[out] headTopY    头部顶部 Y（窗口局部像素）
     /// @param[out] modelPixelHeight 模型整体像素高度（用于动态 offset）
@@ -127,6 +127,9 @@ private:
 
     /// 每帧在 paintGL 中调用：计算头部锚点并写入缓存
     void computeAndCacheHeadAnchor();
+
+    /// 写入一次头部锚点摘要日志（仅模型加载/切换时调用）
+    void writeAnchorSummaryLog();
 
     /// 完整命中检测：HitAreas → drawable 匹配 → 高度比例 fallback
     /// @param px,py 窗口像素坐标
@@ -180,4 +183,9 @@ private:
     float  m_cachedHeadCenterX      = 0.0f;
     float  m_cachedHeadTopY         = 0.0f;
     float  m_cachedModelPixelHeight = 0.0f;
+
+    // ★ 锚点来源跟踪（用于诊断和摘要日志）
+    QString m_lastAnchorSource;
+    // ★ 模型刚加载/切换标志 — 下次 computeAndCacheHeadAnchor 后写一次摘要日志
+    bool m_needsAnchorLog = false;
 };
