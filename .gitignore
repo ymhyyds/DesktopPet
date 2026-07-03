@@ -1,0 +1,52 @@
+# Build output
+build/
+cmake-build-*/
+
+# Runtime generated
+database/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Debug logs (only in build output, not project root)
+build/*.txt
+live2d_debug_log.txt
+hit_debug.txt
+hit_release.txt
+pet_action.txt
+perf_log.txt
+
+# Large model assets (binary — tracked externally)
+characters/**/*.png
+characters/**/*.moc3
+characters/**/*.cdi3*
+characters/**/texture_*
+characters/**/*.8192/*
+
+# Qt Creator / IDE
+*.user
+*.pro.user*
+CMakeSettings.json
+.vs/
+.idea/
+*.swp
+*.swo
+
+# Qt
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+
+# Windows
+*.exe
+*.dll
+*.lib
+*.pdb
+*.ilk
+*.exp
+*.obj
+
+# OS
+.DS_Store
+Thumbs.db
