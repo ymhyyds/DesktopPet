@@ -1,0 +1,64 @@
+{
+	"Version": 3,
+	"Meta": {
+		"Duration": 4,
+		"Fps": 30.0,
+		"Loop": false,
+		"AreBeziersRestricted": true,
+		"CurveCount": 4,
+		"TotalSegmentCount": 4,
+		"TotalPointCount": 10,
+		"UserDataCount": 0,
+		"TotalUserDataSize": 0
+	},
+	"Curves": [
+		{
+			"Target": "Parameter",
+			"Id": "MBDS",
+			"Segments": [
+				0,
+				1,
+				1,
+				1.333,
+				1,
+				2.667,
+				1,
+				4,
+				1
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Id": "HH1",
+			"Segments": [
+				0,
+				0,
+				0,
+				4,
+				40
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Id": "HH2",
+			"Segments": [
+				0,
+				0,
+				0,
+				4,
+				40
+			]
+		},
+		{
+			"Target": "Parameter",
+			"Id": "HH4",
+			"Segments": [
+				0,
+				0,
+				0,
+				4,
+				40
+			]
+		}
+	]
+}

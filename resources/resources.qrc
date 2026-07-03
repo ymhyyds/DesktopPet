@@ -1,0 +1,14 @@
+<RCC>
+    <qresource prefix="/">
+        <!--
+            托盘图标 / 应用图标资源。
+
+            用法：把图标文件（推荐 .png 或 .svg）拖入 resources/icons/ 目录，
+            然后在下方加一行 <file>icons/your_icon.png</file>。
+
+            TrayManager 默认会从本 QRC 加载 ":/icons/tray.png" 作为托盘图标，
+            如果不存在则退而使用 Qt 系统标准图标。
+        -->
+        <!-- <file>icons/tray.png</file> -->
+    </qresource>
+</RCC>

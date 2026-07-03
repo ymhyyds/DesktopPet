@@ -1,0 +1,16 @@
+{
+    "Type": "Live2D Expression",
+    "IsModelCustomizationExpression": false,
+    "Parameters": [
+        {
+            "Id": "AJHL",
+            "Value": 1.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "AJYGGYC",
+            "Value": 1.0,
+            "Blend": "Add"
+        }
+    ]
+}

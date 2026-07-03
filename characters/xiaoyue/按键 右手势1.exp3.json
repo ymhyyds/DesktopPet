@@ -1,0 +1,16 @@
+{
+    "Type": "Live2D Expression",
+    "IsModelCustomizationExpression": false,
+    "Parameters": [
+        {
+            "Id": "AJYSS1",
+            "Value": 1.0,
+            "Blend": "Add"
+        },
+        {
+            "Id": "AJYSYC",
+            "Value": 2.0,
+            "Blend": "Add"
+        }
+    ]
+}

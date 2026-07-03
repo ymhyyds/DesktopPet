@@ -1,0 +1,101 @@
+{
+    "FileReferences": {
+        "DisplayInfo": "xiaoyue.cdi3.json",
+        "Expressions": [
+            {
+                "File": "按键 爱心眼.exp3.json",
+                "Name": "爱心眼"
+            },
+            {
+                "File": "按键 黑脸.exp3.json",
+                "Name": "黑脸"
+            },
+            {
+                "File": "按键 脸红.exp3.json",
+                "Name": "脸红"
+            },
+            {
+                "File": "按键 星星眼.exp3.json",
+                "Name": "星星眼"
+            },
+            {
+                "File": "按键 晕晕眼.exp3.json",
+                "Name": "晕晕眼"
+            },
+            {
+                "File": "按键 加载中.exp3.json",
+                "Name": "加载中"
+            },
+            {
+                "File": "按键 精灵耳.exp3.json",
+                "Name": "精灵耳"
+            },
+            {
+                "File": "按键 丸子头.exp3.json",
+                "Name": "丸子头"
+            },
+            {
+                "File": "按键 眼镜.exp3.json",
+                "Name": "眼镜"
+            },
+            {
+                "File": "按键 前倾.exp3.json",
+                "Name": "前倾"
+            },
+            {
+                "File": "按键 左手势1.exp3.json",
+                "Name": "左手势1"
+            },
+            {
+                "File": "按键 左手势2.exp3.json",
+                "Name": "左手势2"
+            },
+            {
+                "File": "按键 右手势1.exp3.json",
+                "Name": "右手势1"
+            },
+            {
+                "File": "按键 右手势2.exp3.json",
+                "Name": "右手势2"
+            }
+        ],
+        "Moc": "xiaoyue.moc3",
+        "Motions": {
+            "Idle": [
+                {
+                    "FadeInTime": 0.5,
+                    "FadeOutTime": 0.5,
+                    "File": "待机动画124.motion3.json"
+                }
+            ],
+            "TapBody": [
+                {
+                    "FadeInTime": 0.3,
+                    "FadeOutTime": 0.3,
+                    "File": "面捕丢失.motion3.json"
+                }
+            ]
+        },
+        "Physics": "xiaoyue.physics3.json",
+        "Textures": [
+            "xiaoyue.8192/texture_00.png"
+        ]
+    },
+    "Groups": [
+        {
+            "Ids": [
+            ],
+            "Name": "LipSync",
+            "Target": "Parameter"
+        },
+        {
+            "Ids": [
+                "ParamEyeLOpen",
+                "ParamEyeROpen"
+            ],
+            "Name": "EyeBlink",
+            "Target": "Parameter"
+        }
+    ],
+    "Version": 3
+}

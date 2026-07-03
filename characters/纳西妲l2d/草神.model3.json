@@ -1,0 +1,137 @@
+{
+  "Version": 3,
+  "Type": 0,
+  "Bounds": {
+    "Width": 4.563491,
+    "Height": 6.437529,
+    "CenterX": 0.3573179,
+    "CenterY": -0.4120696
+  },
+  "FileReferences": {
+    "Moc": "草神.moc3",
+    "Textures": [
+      "草神.4096/texture_00.png",
+      "草神.4096/texture_01.png"
+    ],
+    "Physics": "草神.physics3.json",
+    "PhysicsV2": {
+      "File": "草神.physics3.json",
+      "MaxWeight": 0.752
+    },
+    "Motions": {
+      "Idle": [
+        {
+          "File": "motions/idle for EX.motion3.json",
+          "FadeIn": 1000,
+          "FadeOut": 1000
+        }
+      ],
+      "Tap花": [
+        {
+          "File": "motions/special.motion3.json",
+          "FadeIn": 1000,
+          "FadeOut": 0
+        }
+      ],
+      "Tap头": [
+        {
+          "File": "motions/special head.motion3.json"
+        }
+      ]
+    }
+  },
+  "Controllers": {
+    "ParamHit": {},
+    "ParamLoop": {},
+    "KeyTrigger": {},
+    "ParamTrigger": {},
+    "AreaTrigger": {},
+    "HandTrigger": {},
+    "EyeBlink": {
+      "MinInterval": 500,
+      "MaxInterval": 6000
+    },
+    "LipSync": {
+      "Gain": 5.0
+    },
+    "MouseTracking": {
+      "SmoothTime": 0.199807152,
+      "Items": [
+        {
+          "Id": "ParamBodyAngleY",
+          "Min": -10.0,
+          "Max": 10.0,
+          "DefaultValue": 0.0,
+          "Axis": 1,
+          "Input": 0
+        },
+        {
+          "Id": "ParamBodyAngleX",
+          "Min": -10.0,
+          "Max": 10.0,
+          "DefaultValue": 0.0,
+          "BlendMode": 1,
+          "Input": 0
+        },
+        {
+          "Id": "ParamAngleX",
+          "Min": -30.0,
+          "Max": 30.0,
+          "DefaultValue": 0.0,
+          "BlendMode": 1,
+          "Input": 0
+        },
+        {
+          "Id": "ParamAngleY",
+          "Min": -30.0,
+          "Max": 30.0,
+          "DefaultValue": 0.0,
+          "BlendMode": 1,
+          "Axis": 1,
+          "Input": 0
+        }
+      ],
+      "Enabled": true
+    },
+    "AutoBreath": {},
+    "ExtraMotion": {},
+    "Accelerometer": {
+      "Enabled": true
+    },
+    "Microphone": {},
+    "Transform": {},
+    "FaceTracking": {
+      "Enabled": true
+    },
+    "HandTracking": {},
+    "ParamValue": {
+      "Items": [
+        {
+          "Name": "飘动幅度",
+          "Ids": [
+            "Param21"
+          ]
+        }
+      ],
+      "Enabled": true
+    },
+    "PartOpacity": {},
+    "ArtmeshOpacity": {},
+    "ArtmeshColor": {},
+    "ArtmeshCulling": {
+      "DefaultMode": 0
+    },
+    "IntimacySystem": {}
+  },
+  "HitAreas": [
+    {
+      "Name": "花",
+      "Id": "ArtMesh"
+    },
+    {
+      "Name": "头",
+      "Id": "face"
+    }
+  ],
+  "Options": {}
+}
