@@ -71,14 +71,10 @@ public:
     static constexpr double kAnimMarginRatio = 0.01;
 
 signals:
-    void dragFinished();
     void modelSizeLoaded();
     void modelScaleChanged(double scale);
 
 protected:
-    void mousePressEvent(QMouseEvent *event) override;
-    void mouseMoveEvent(QMouseEvent *event) override;
-    void mouseReleaseEvent(QMouseEvent *event) override;
     void contextMenuEvent(QContextMenuEvent *event) override;
     void moveEvent(QMoveEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
@@ -102,9 +98,6 @@ private:
     Live2DView       *m_live2DView       = nullptr;
     SpeechBubble     *m_speechBubble     = nullptr;
     CharacterConfig   m_currentConfig;
-
-    bool m_dragging = false;
-    QPoint m_dragStartOffset;
 
     double m_tightModelWidth  = 0.0;
     double m_tightModelHeight = 0.0;

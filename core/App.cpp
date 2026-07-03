@@ -344,6 +344,7 @@ bool App::initialize()
     m_petWindow->show();
 
     // ★ Phase 2: InputProxyWindow 在 PetWindow 显示之后 show，Z-order 在其上方
+    m_inputProxyWindow->syncGeometry();  // 同步 PetWindow 放置后的 geometry
     m_inputProxyWindow->updateInputMask();
     m_inputProxyWindow->show();
     m_inputProxyWindow->raise();  // 确保在 PetWindow 之上

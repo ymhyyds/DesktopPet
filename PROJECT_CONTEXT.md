@@ -2123,7 +2123,61 @@ pet/Live2DView.h     — 添加 m_needsAnchorLog / m_lastAnchorSource，移除�
 PROJECT_CONTEXT.md   — 本会话记录
 ```
 
-### 绝对不能修改
+---
+
+## 会话36 — 双窗口智能穿透回归排查（2026-07-03）
+
+### 当前双窗口结构
+
+| 窗口 | 职责 | 关键属性 |
+|:-----|:-----|:---------|
+| **PetWindow**（下层） | 仅 Live2D 渲染，永久输入穿透 | `FramelessWindowHint \| WindowStaysOnTopHint \| Tool \| WindowTransparentForInput`；`WA_TranslucentBackground`；`nativeEventFilter` → `HTTRANSPARENT`；无 mask；无 mousePress/Move/Release 重写 |
+| **InputProxyWindow**（上层） | 智能穿透 + 全部鼠标交互 | `FramelessWindowHint \| WindowStaysOnTopHint \| Tool`；`WA_TranslucentBackground`；`setMask(modelRegion)`；`paintEvent` 在 mask 区域内绘制 alpha=1 输入表面 |
+
+### 当前回归现象
+
+1. **模型外透明区域仍会触发桌宠交互** — mask 外的输入未被完全阻断
+2. **模型区域有时也穿透到桌面** — WS_EX_LAYERED + alpha=0 区域可能被 OS 丢弃点击
+3. **托盘无法正常点击** — 可能被 InputProxyWindow 重叠区域干扰鼠标事件
+
+### 已确认的诊断结果
+
+| 检查项 | 值 | 结论 |
+|:-------|:---|:-----|
+| `isVisible()` | true | ✅ 窗口可见 |
+| `isEnabled()` | true | ✅ 窗口启用 |
+| **GWL_EXSTYLE** | `0x8080088` | ✅ `WS_EX_LAYERED=1`（由 `WA_TranslucentBackground` 产生）；`WS_EX_TRANSPARENT=0`（不阻断鼠标） |
+| **modelRect** | (126.7, 396.5, 160.2, 502.8) | ✅ 非空，覆盖模型可见区域 |
+| **mask region** | (97, 366, 220, 563) | ✅ 非空，`setMask()` 已执行 |
+| **paintEvent** | mask 区域内 alpha=1 绘制 | ✅ 输入表面存在 |
+| **geometry** | 404×1268（首次）→ 346×1268（稳定） | ✅ 与 PetWindow 一致 |
+| **Z-order** | 2 秒定时器 `raise()` | ✅ InputProxyWindow 在 PetWindow 上方 |
+
+### 下一步排查方向
+
+| 方向 | 原因 |
+|:-----|:-----|
+| **mouse grab 是否未释放** | InputProxyWindow 的 `mousePressEvent` 没有显式 `grabMouse()`/`releaseMouse()`，Qt 可能没有正确路由后续事件 |
+| **modelRegion 是否只是粗 `boundingRect()`** | `QRegion` 的 `boundingRect()` 是矩形包络，可能包含透明间隙，导致误判 |
+| **`nativeEventFilter` 是否误处理其他 HWND** | PetWindow 的 `nativeEventFilter` 仍返回 `HTTRANSPARENT`，可能误作用于子 HWND（如托盘） |
+| **InputProxyWindow geometry 是否过大** | 窗口尺寸 346×1268 竖长条，可能超出 PetWindow 实际显示范围，遮挡其他窗口区域 |
+| **modelRegion 外是否仍进入交互入口** | 即使 mask 正确，`mousePressEvent` 仍可能在 mask 外被调用（需要添加 `mask.contains()` 前置检查） |
+
+### 禁止修改
+
+| 模块 | 约束 |
+|:-----|:-----|
+| PetWindow `WindowTransparentForInput` | 永久输入穿透，不可取消 |
+| × Live2D 渲染管线 | 不修改 `Live2DView`、`ModelController`、Cubism SDK |
+| × Physics / Motion / deltaTime | 物理引擎和动作系统 |
+| × InteractionManager 内部逻辑 | 双击/长按/挂机/单击分发逻辑 |
+| × 浮动文字锚点修复 | 会话35 的 `BodyVisualTop` 修复已锁定 |
+| × 左右键交互映射 | 左键 head/body 区别 + 右键菜单 |
+| × 窗口比例和 scale | `applyTightSize()` 算法 |
+
+---
+
+## 绝对不能修改
 
 | 模块 | 约束 |
 |------|------|
@@ -2138,3 +2192,175 @@ PROJECT_CONTEXT.md   — 本会话记录
 | 窗口尺寸计算 | `applyTightSize()`、`modelH=basePx` 算法 |
 | 浮动文字定位公式 | `headTopY - offset - widgetHeight` + `offset=modelPixelHeight×0.065` |
 | Head Anchor 计算（Head HitArea / Tight Bounds 分支） | 已锁定；仅 Body-only 回退分支在会话35 被修正 |
+
+---
+
+## 会话37/38 — 智能穿透回归修复：多矩形 mask + 严格入口过滤 → 已验收 ✅（2026-07-03 已验收）
+
+> **验收结果：** 全部 10 项回归测试通过。智能穿透功能验收通过，可提交。
+
+### 根因回顾（会话36 诊断）
+
+| 根因 | 严重度 | 状态 |
+|:-----|:-------|:-----|
+| **B. 粗矩形 mask** | 🔴 核心 | 旧 `updateInputMask()` 使用 `getModelPixelRect()` 的 1 个 bounding rect + 30px padding，透明间隙内点击也能触发拖拽 |
+| **D. geometry 过大** | 🟡 中等 | InputProxyWindow 覆盖右侧全屏幕（346×1268），可能遮挡系统托盘 |
+| **A. 拖拽无条件启动** | 🟢 间接 | `m_dragging = true` 在任何 mask 内点击都设置，不检查 `hitTestAt` |
+| **C. 事件过滤误拦截** | 🟢 已排除 | `nativeEventFilter` HWND 范围检查正确 |
+
+### 本轮修复内容
+
+#### 1. 多矩形模型区域 mask（替代旧的 tight bounds + 30px 单矩形）
+
+**文件：** `interaction/InputProxyWindow.cpp` — `updateInputMask()`
+
+```cpp
+// 旧：单矩形 = tight bounds + 30px
+QRegion region(px, py, pw, ph);
+
+// 新：逐 Drawable AABB + 4px padding → 多矩形 QRegion
+QVector<QRect> drawableRects;
+m_live2DView->getVisibleDrawableRects(drawableRects);
+QRegion preciseRegion;
+for (const QRect &rect : drawableRects)
+    preciseRegion |= QRegion(rect.adjusted(-4, -4, 4, 4));
+```
+
+**新增成员变量：**
+- `m_preciseRegion` (`QRegion`) — 缓存的精确 region，用于防重复 `setMask` + `paintEvent` alpha 绘制
+- `m_preciseRegionValid` (`bool`) — region 是否有效
+- `kMaskPaddingPx = 4` — 每 Drawable 4px padding（旧 `kMaskPaddingPx = 30` 已删除）
+
+**行为变更：**
+- 空 drawableRects / 裁剪后 region 为空 → **保留上一次有效 mask**，不清除
+- 全窗口 region → 清除 mask（罕见情况）
+- 相同 region → 跳过 `setMask`
+- `paintEvent` 仅在 `m_preciseRegion` 内绘制 alpha=1
+
+#### 2. qApp 级 eventFilter — 拦截非模型事件
+
+**文件：** `interaction/InputProxyWindow.cpp` — 新增 `eventFilter()` + 构造函数中 `qApp->installEventFilter(this)`
+
+```
+qApp 级 eventFilter（在 widget 级 eventFilter 之前执行）
+  ↓
+watched == this ?
+  ├─ 否 → 放行（不处理其他窗口事件）
+  └─ 是 → 检查事件类型 + hitTestAt(pos) ?
+       ├─ 通过 → 放行（正常路由到 InteractionManager + event handler）
+       └─ 失败 → return true（拦截 → InteractionManager 看不到）
+```
+
+拦截的事件类型：
+- `QEvent::MouseButtonPress`
+- `QEvent::MouseButtonRelease`
+- `QEvent::MouseButtonDblClick`
+- `QEvent::MouseMove`
+- `QEvent::ContextMenu`
+
+#### 3. 拖拽严格守卫
+
+**文件：** `interaction/InputProxyWindow.cpp`
+
+- `mousePressEvent`: `m_dragging = true` 仅当 `hitTestAt(pos)` 通过后设置（双层保护，eventFilter 已拦截未命中事件）
+- `mouseReleaseEvent`: 释放时 `releaseMouse()` 确保 `mouseGrabber() == nullptr`
+- 新增 `hideEvent`: `m_dragging = false; releaseMouse()` 清理
+- 所有 cleanup 路径确保 `m_pressInHead/bodyArea = false`
+
+#### 4. Geometry 裁剪与坐标偏移
+
+**文件：** `interaction/InputProxyWindow.cpp` — `syncGeometry()`
+
+```
+syncGeometry():
+  1. 记录 petGeo、screen、available geometry
+  2. 如果 PetWindow 超出 available area → intersected
+  3. m_geoOffsetX/Y = intersected.origin - petGeo.origin
+  4. 多显示器 fallback: 窗口中心不在任何屏幕时移到主屏
+  5. updateInputMask 中 r.translate(-m_geoOffsetX, -m_geoOffsetY)
+```
+
+**新增成员变量：**
+- `m_geoOffsetX` / `m_geoOffsetY` (`int`) — PetWindow origin 到裁剪后 InputProxyWindow origin 的偏移
+
+### 实际修复内容总览（最终验收版本）
+
+| 维度 | 修复方式 |
+|:-----|:---------|
+| **mask** | `getVisibleDrawableRects()` 逐 Drawable AABB + 4px → 多矩形 QRegion，替代旧单矩形 + 30px |
+| **事件过滤** | qApp 级 `eventFilter`，只处理 `this` 及子对象事件；`isInteractivePoint()` 三层检测（preciseRegion + hitTestAt + alphaTestAt） |
+| **拖拽守卫** | 超 6px 阈值才 `grabMouse()`；`releaseMouse()` 全覆盖（MouseRelease + deactivate + hide + 非交互点） |
+| **Geometry 裁剪** | PetWindow 超屏时裁剪 InputProxyWindow 到 available，`m_geoOffsetX/Y` 修正 mask 坐标 |
+| **paintEvent** | 整窗 α=0 + clip preciseRegion + fill α=1，确保 WS_EX_LAYERED 区域接收鼠标 |
+| **诊断代码** | `proxy_diag.txt`、`PROXY_DIAG` 宏、诊断日志已全部删除 |
+| **PetWindow** | 移除 mousePress/Move/Release 重写，增加 `WindowTransparentForInput`；nativeEventFilter 返回 HTTRANSPARENT |
+
+### 验收结果
+
+| # | 测试项 | 结果 |
+|:-|:-------|:-----|
+| 1 | 左键头部 → 摸摸头 + 浮动文字 | ✅ 通过 |
+| 2 | 左键身体 → body tap 动作 | ✅ 通过 |
+| 3 | 双击模型实体 → ChatWindow（只一次） | ✅ 通过 |
+| 4 | 双击透明区域 → 底层程序收到双击 | ✅ 通过 |
+| 5 | 右键模型实体 → 弹出菜单 | ✅ 通过 |
+| 6 | 右键透明区域 → 底层程序收到右键 | ✅ 通过 |
+| 7 | 拖拽正常，释放后 `mouseGrabber == nullptr` | ✅ 通过 |
+| 8 | 托盘/ChatWindow/设置窗口正常交互 | ✅ 通过 |
+| 9 | 渲染无裁剪/闪烁/Physics 掉帧 | ✅ 通过 |
+| 10 | 切换模型/缩放 → mask 不错位 | ✅ 通过 |
+
+### 已验证的风险
+
+| # | 风险 | 验证结果 |
+|:-|:-----|:---------|
+| 1 | eventFilter 误拦截其他窗口 | ✅ 聊天/设置/托盘均正常 |
+| 2 | `return true` 不能跨进程穿透 | ✅ OS 级 `setMask` 正确拦截，eventFilter 仅做应用层补充 |
+| 3 | Drawable AABB 透明间隙 | ✅ `isInteractivePoint` 的 alphaTestAt 二次过滤已覆盖 |
+| 4 | geometry fallback 错位 | ✅ 单显示器场景正确，多显示器待实测 |
+| 5 | grabMouse 行为 | ✅ release/hide/deactivate 全部正确释放 |
+| 6 | mask 更新频率 | ✅ 防重复检查 + 空 region 保留有效 mask，实测无抖动 |
+
+### 最终架构
+
+```
+App::initialize()
+  └─ PetWindow::show()
+  └─ InputProxyWindow::syncGeometry()    // 跟随 PetWindow geometry
+  └─ InputProxyWindow::updateInputMask()  // 构建多矩形 mask
+  └─ InputProxyWindow::show()
+  └─ InputProxyWindow::raise()
+
+InputProxyWindow 事件流：
+  qApp->eventFilter                      // ① 全局拦截
+    ├─ watched != this 且非子对象 → return false (放行)
+    └─ isInteractivePoint(localPos) ?
+         ├─ false → return true (拦截 + cleanupDrag)
+         └─ true → event handler        // ② 正常事件路由
+              ├─ mousePressEvent   → hitTest + alphaTest, 记录 head/body
+              ├─ mouseMoveEvent    → 超 6px → grabMouse + drag
+              ├─ mouseReleaseEvent → triggerPet / playTapMotion / cleanupDrag
+              ├─ mouseDoubleClickEvent → QWidget::mouseDoubleClickEvent
+              └─ contextMenuEvent → PetWindow::contextMenuEvent
+
+PetWindow:
+  WindowTransparentForInput + nativeEventFilter → HTTRANSPARENT
+  └─ 仅 Live2D 渲染，永久输入穿透
+
+Windows 级穿透:
+  setMask(preciseRegion) → mask 外自动 WM_NCHITTEST → HTTRANSPARENT
+  paintEvent → mask 内 α=1, mask 外 α=0 (WS_EX_LAYERED)
+```
+
+### 最终锁定约束
+
+| 模块 | 约束 |
+|:-----|:-----|
+| PetWindow 渲染和 `WindowTransparentForInput` | 永久输入穿透，不可取消 |
+| InputProxyWindow 事件转发 | 事件映射已验证通过，不可修改 |
+| 智能穿透结构 | 双窗口分离方案已锁定（PetWindow 纯渲染 + InputProxyWindow 输入代理） |
+| 左右键交互映射 | 左键 head/body 区别 + 右键菜单 |
+| InteractionManager 内部逻辑 | 双击/长按/挂机/单击分发逻辑 |
+| Physics / Motion / deltaTime | 物理引擎和动作系统 |
+| 浮动文字锚点修复 | 会话35 的 `BodyVisualTop` 修复已锁定 |
+| 窗口比例和 scale | `applyTightSize()` 算法 |

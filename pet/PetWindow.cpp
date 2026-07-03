@@ -36,7 +36,8 @@ PetWindow::PetWindow(const CharacterConfig &initialConfig, QWidget *parent)
     , m_lastFeedDate(QDate::currentDate())
     , m_dailyResetDate(QDate::currentDate())
 {
-    setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool);
+    setWindowFlags(Qt::FramelessWindowHint | Qt::WindowStaysOnTopHint | Qt::Tool
+                   | Qt::WindowTransparentForInput);  // 永久输入穿透，只负责 Live2D 渲染
     setAttribute(Qt::WA_TranslucentBackground, true);
     setAutoFillBackground(false);
 
@@ -760,37 +761,8 @@ void PetWindow::loadState()
 }
 
 // ---------------------------------------------------------------------------
-// 鼠标事件
+// 右键上下文菜单（由 InputProxyWindow 转发）
 // ---------------------------------------------------------------------------
-void PetWindow::mousePressEvent(QMouseEvent *event)
-{
-    if (event->button() == Qt::LeftButton) {
-        m_dragging = true;
-        m_dragStartOffset = event->pos();
-    }
-    QWidget::mousePressEvent(event);
-}
-
-void PetWindow::mouseMoveEvent(QMouseEvent *event)
-{
-    if (m_dragging && (event->buttons() & Qt::LeftButton)) {
-        const QPoint newTopLeft = event->globalPosition().toPoint() - m_dragStartOffset;
-        move(newTopLeft);
-    }
-    QWidget::mouseMoveEvent(event);
-}
-
-void PetWindow::mouseReleaseEvent(QMouseEvent *event)
-{
-    if (event->button() == Qt::LeftButton && m_dragging) {
-        m_dragging = false;
-        emit dragFinished();
-    }
-    QWidget::mouseReleaseEvent(event);
-}
-
-// ---------------------------------------------------------------------------
-// 右键上下文菜单
 // ---------------------------------------------------------------------------
 void PetWindow::contextMenuEvent(QContextMenuEvent *event)
 {
