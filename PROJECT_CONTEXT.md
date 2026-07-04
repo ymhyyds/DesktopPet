@@ -2532,3 +2532,43 @@ else                    → Hidden（双窗口同步隐藏）
 
 ---
 
+
+## 会话 39–42 综合结论（2026-07-04 ✅）
+
+### 当前状态
+
+| 项目 | 值 |
+|------|-----|
+| 分支 | `fix/tts-idle-speech-integrity` |
+| 基线 | `v0.4.0-stable-fullscreen-policy` (110e71a) |
+| 提交 1 | `b61266f` — idle proactive speech 完整性修复 |
+| 提交 2 | `0808d64` — 右键菜单 activePopupHwnd 层级修复 |
+
+### 已提交修复摘要
+
+1. **m_aiBusy 双向并发保护** — idle 主动请求时抑制用户消息发送；用户消息发送时检查 AI busy 状态，忙碌时显示"AI 正在回复，请稍后再试"；reply/error 清除 busy 标志。
+2. **Proactive prompt 不污染长期历史** — idleTimeout handler 通过 `contextHistory()` 局部副本传递 prompt，不再调用 `appendUserMessage`。
+3. **idleTimeoutMinutes 持久化** — QSettings 写入/读取，重启恢复。
+4. **setIdleTimeoutMs 立即重置计时器** — 修改间隔后始终 `start()`。
+5. **右键菜单 activePopupHwnd** — PetWindow 以 `QTimer::singleShot(0)` 追踪 QMenu 真实 HWND，`App::applyPairedWindowPolicy` 在 100ms 定时器中识别弹出窗口并将 Pet/Proxy 放置在其下方。已人工验证 ✅
+
+### 已确认的缺陷限制
+
+| 问题 | 范围 | 决策 |
+|------|------|------|
+| SAPI 仅第一次播放语音 | **仅 SAPI PowerShell 后端** — COM STA 线程模型导致 `$s.Speak()` 第二次无声 | **停止修复**，由 Edge TTS 替换 |
+| VoiceVox / 公共 TtsEngine 状态 | **不受影响** — HTTP API 独立路径，引擎生命周期正常 | — |
+
+### 下一阶段任务（按优先级）
+
+1. **移除 SAPI，接入 Edge TTS**（HTTP API，无进程/COM 依赖）
+2. VoiceVox 播放队列 + 后端切换取消
+3. 右键菜单事件重置挂机计时器
+
+### 工作区说明
+
+- ✅ 所有临时诊断代码已清理（ttsDiagFile/ttsLog/s_replyNo）
+- ✅ 无日志、MP3、WAV、build_reports
+- ✅ ai/TtsEngine.cpp 已恢复至 HEAD（无差异）
+- ✅ Release 构建：0 errors, 0 warnings
+- ✅ 两个独立提交，工作区干净
