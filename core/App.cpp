@@ -1333,21 +1333,50 @@ void App::applyPairedWindowPolicy(PairedWindowPolicy policy)
         m_inputProxyWindow->syncGeometry();
         if (!m_inputProxyWindow->isVisible()) m_inputProxyWindow->show();
 
-        // PetWindow 先设为 TOPMOST（位于 TOPMOST band 底部）
-        SetWindowPos(petHwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-        // InputProxyWindow 再设为 TOPMOST（位于 PetWindow 上方）
-        SetWindowPos(proxyHwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        {
+            HWND popupHwnd = m_petWindow->activePopupHwnd();
+            if (popupHwnd && IsWindowVisible(popupHwnd)) {
+                // 有活动弹出窗口：弹出窗口在最前，Pet/Proxy 在其下方
+                SetWindowPos(popupHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                SetWindowPos(proxyHwnd, popupHwnd, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                SetWindowPos(petHwnd, proxyHwnd, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            } else {
+                SetWindowPos(petHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                SetWindowPos(proxyHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
+        }
         break;
 
     case PairedWindowPolicy::Normal:
         {
-            // Normal 策略：两窗口始终 TOPMOST，不被普通窗口遮挡
-            SetWindowPos(petHwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-            SetWindowPos(proxyHwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            // ── 检查 PetWindow 是否有活动弹出窗口（右键菜单） ──
+            // 由 PetWindow::contextMenuEvent 通过 QTimer 跟踪真正的弹出 HWND
+            HWND popupHwnd = m_petWindow->activePopupHwnd();
+
+            if (popupHwnd && IsWindowVisible(popupHwnd)) {
+                qInfo() << "[App] applyPairedWindowPolicy(Normal) popupHwnd=" << popupHwnd
+                        << "-> ordering below popup";
+                // 有活动弹出窗口（右键菜单）：
+                // 1. 确保弹出窗口位于 TOPMOST band 顶端
+                // 2. Pet/Proxy 放置在弹出窗口下方
+                SetWindowPos(popupHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                SetWindowPos(proxyHwnd, popupHwnd, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                SetWindowPos(petHwnd, proxyHwnd, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            } else {
+                // Normal 策略：两窗口始终 TOPMOST，不被普通窗口遮挡
+                SetWindowPos(petHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                SetWindowPos(proxyHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            }
         }
         break;
 

@@ -21,6 +21,7 @@
 #include <QSettings>
 #include <QApplication>
 #include <QAbstractNativeEventFilter>
+#include <QTimer>
 
 #include <algorithm>
 
@@ -629,6 +630,18 @@ void PetWindow::contextMenuEvent(QContextMenuEvent *event)
 {
     QMenu menu(this);
 
+#if defined(Q_OS_WIN)
+    // ★ 菜单弹出时设为 TOPMOST，避免被同样 HWND_TOPMOST 的 InputProxyWindow 遮挡
+    menu.setWindowFlags(menu.windowFlags() | Qt::WindowStaysOnTopHint);
+
+    // ★ 跟踪菜单 HWND（在 exec() 事件循环中通过 QTimer 获取真正的弹出窗口 HWND）
+    m_activePopupHwnd = nullptr;
+    QTimer::singleShot(0, &menu, [this, &menu]() {
+        m_activePopupHwnd = reinterpret_cast<HWND>(menu.winId());
+        qInfo() << "[PetWindow] contextMenu popupHwnd=" << m_activePopupHwnd;
+    });
+#endif
+
     const QDate today = QDate::currentDate();
     if (today != m_dailyResetDate) {
         m_dailyResetDate = today;
@@ -792,6 +805,11 @@ void PetWindow::contextMenuEvent(QContextMenuEvent *event)
     }
 
     saveState();
+
+#if defined(Q_OS_WIN)
+    // 菜单已关闭，清除跟踪的 HWND
+    m_activePopupHwnd = nullptr;
+#endif
 }
 
 // ---------------------------------------------------------------------------

@@ -57,6 +57,11 @@ public:
     void setSpeechBubbleBorderColor(const QColor &color);
     void setSpeechBubbleTextColor(const QColor &color);
 
+#if defined(Q_OS_WIN)
+    /// 当前活动弹出窗口 HWND（右键菜单），用于 App 层 z-order 策略
+    HWND activePopupHwnd() const { return m_activePopupHwnd; }
+#endif
+
     void setBackgroundImage(const QString &filePath);
     void setBackgroundCropped(const QString &croppedPath, const QString &sourcePath);
     void clearBackground();
@@ -146,4 +151,8 @@ private:
     void applyMaskRegion(const QRegion &region, int drawableCount);
     QRegion dilateRegion(const QRegion &region, int px);
     void onMaskTimer();
+
+#if defined(Q_OS_WIN)
+    HWND m_activePopupHwnd = nullptr;  ///< 右键菜单弹出后跟踪其 HWND
+#endif
 };
