@@ -281,14 +281,8 @@ bool App::initialize()
     // 窗口可见性同步（全局快捷键隐藏/显示桌宠时同步 InputProxyWindow）
     // 通过 PetWindow::modelSizeLoaded 在首次 show 后同步（无需 show/hide event filter）
 
-    // 定期维护 Z-order：InputProxyWindow 必须在 PetWindow 之上
-    auto *zOrderTimer = new QTimer(this);
-    connect(zOrderTimer, &QTimer::timeout, this, [this]() {
-        if (m_inputProxyWindow && m_inputProxyWindow->isVisible()) {
-            m_inputProxyWindow->raise();
-        }
-    });
-    zOrderTimer->start(2000);  // 2秒间隔 — 足够弥补 SetWindowPos(HWND_TOPMOST) 的影响
+    // Z-order 由 applyPairedWindowPolicy() 统一管理，不再使用定时器 raise()
+    // 参见 syncPairedWindowZOrder() + applyPairedWindowPolicy()
 
     // ---------------------------------------------------------------
     // 6. 聊天窗口 + 设置窗口
@@ -328,6 +322,23 @@ bool App::initialize()
 
     setupConnections();
 
+    // ──── 全屏显示设置从 QSettings 恢复 ────
+    {
+        QSettings ss(QStringLiteral("DesktopPet"), QStringLiteral("App"));
+        m_fullscreenDisplayEnabled = ss.value(QStringLiteral("fullscreenDisplay/enabled"), true).toBool();
+        qInfo() << "[App] 全屏显示设置已加载：" << (m_fullscreenDisplayEnabled ? "启用" : "禁用");
+    }
+
+    // ★ 全屏检测定时器（100ms）— App 唯一全屏状态管理者
+    // 在信号 connect 之后启动，确保首次发射不丢失
+    m_fullscreenCheckTimer = new QTimer(this);
+    m_fullscreenCheckTimer->setInterval(100);
+    connect(m_fullscreenCheckTimer, &QTimer::timeout, this, [this]() {
+        refreshExternalFullscreenState();
+        applyCurrentPairedWindowPolicy();
+    });
+    m_fullscreenCheckTimer->start();
+
     // 加载历史聊天记录到聊天窗口
     {
         const auto history = m_memoryDb->loadHistory(m_currentCharacter, 200);
@@ -347,7 +358,8 @@ bool App::initialize()
     m_inputProxyWindow->syncGeometry();  // 同步 PetWindow 放置后的 geometry
     m_inputProxyWindow->updateInputMask();
     m_inputProxyWindow->show();
-    m_inputProxyWindow->raise();  // 确保在 PetWindow 之上
+    // 统一同步双窗口 Z-order（替代旧的独立 raise()）
+    syncPairedWindowZOrder();
 
     m_trayManager->show();
 
@@ -506,53 +518,15 @@ void App::setupConnections()
 
     connect(m_trayManager.get(), &TrayManager::settingsRequested,
             this, [this]() {
-                m_settingsWindow->setApiKeyConfigured(m_aiClient->hasApiKey());
-                m_settingsWindow->setSnapThresholdPx(m_windowManager->snapThreshold());
-                m_settingsWindow->setIdleTimeoutMinutes(m_interactionManager->idleTimeoutMs() / 60000);
-                m_settingsWindow->setModelScale(m_petWindow->modelScale());
-                m_settingsWindow->setHeadTrackingEnabled(m_petWindow->headTrackingEnabled());
-                m_settingsWindow->setKeepOnTop(m_petWindow->fullscreenOverlayEnabled());
-                m_settingsWindow->setTtsEnabled(m_ttsEngine && m_ttsEngine->isEnabled());
-
-                // 📸 当前截图保存路径
-                QSettings ss(QStringLiteral("DesktopPet"), QStringLiteral("Screenshot"));
-                m_settingsWindow->setScreenshotPath(
-                    ss.value(QStringLiteral("savePath")).toString());
-
-                if (m_ttsEngine) {
-                    m_settingsWindow->setTtsBackend(static_cast<int>(m_ttsEngine->backend()));
-                    m_settingsWindow->setAvailableVoices(
-                        m_ttsEngine->availableVoices(), m_ttsEngine->voice());
-                    m_settingsWindow->setVoiceVoxUrl(m_ttsEngine->voiceVoxUrl());
-
-                    // 如果是 VoiceVox 后端且说话人还没缓存，触发拉取
-                    if (m_ttsEngine->backend() == TtsEngine::VoiceVox
-                        && m_ttsEngine->availableVoices().isEmpty()) {
-                        m_settingsWindow->setVoiceVoxLoading(true);
-                        m_ttsEngine->refreshVoices();
-                    }
-                }
-                // 聊天背景状态
-                m_settingsWindow->setChatBackgroundImagePath(m_chatWindow->backgroundImagePath());
-                m_settingsWindow->setChatBackgroundOpacity(m_chatWindow->backgroundOpacity());
-                m_settingsWindow->setChatCropButtonEnabled(!m_chatWindow->backgroundImagePath().isEmpty());
-
-                // 🎨 说话气泡颜色状态
-                {
-                    QSettings ss(QStringLiteral("DesktopPet"), QStringLiteral("SpeechBubble"));
-                    const QString bgColor = ss.value(QStringLiteral("bgColor")).toString();
-                    const QString borderColor = ss.value(QStringLiteral("borderColor")).toString();
-                    const QString textColor = ss.value(QStringLiteral("textColor")).toString();
-                    if (!bgColor.isEmpty())
-                        m_settingsWindow->setBubbleBgColor(QColor(bgColor));
-                    if (!borderColor.isEmpty())
-                        m_settingsWindow->setBubbleBorderColor(QColor(borderColor));
-                    if (!textColor.isEmpty())
-                        m_settingsWindow->setBubbleTextColor(QColor(textColor));
-                }
-
-                m_settingsWindow->showAndRaise();
+                openSettingsWindow();
             });
+
+    // ★ SettingsWindow 关闭 → 清理 auxiliaryHost
+    connect(m_settingsWindow.get(), &SettingsWindow::closed, this, [this]() {
+#ifdef Q_OS_WIN
+        m_auxiliaryHostForSettings = nullptr;
+#endif
+    });
 
     connect(m_trayManager.get(), &TrayManager::parameterWindowRequested,
             this, [this]() {
@@ -678,12 +652,50 @@ void App::setupConnections()
                 }
             });
 
-    // ★ 设置 → 游戏全屏时始终显示桌宠（触发全屏检测，而非无条件置顶）
+    // ★ 设置 → 游戏全屏时始终显示桌宠（同步 + 立即生效，不依赖 closeEvent）
     connect(m_settingsWindow.get(), &SettingsWindow::keepOnTopToggled,
             this, [this](bool enabled) {
-                if (m_petWindow) {
-                    m_petWindow->setFullscreenOverlayEnabled(enabled);
+                const bool beforeActive = m_effectiveExternalFullscreenActive;
+
+                // 1. 更新 App 的 fullscreenDisplayEnabled + QSettings
+                setFullscreenDisplayEnabled(enabled);
+
+#ifdef Q_OS_WIN
+                HWND fg = GetForegroundWindow();
+
+                // 2. 验证 m_auxiliaryHostForSettings（openSettingsWindow 捕获的宿主）
+                bool  candidateValid = false;
+                HWND candidate = nullptr;
+
+                if (m_auxiliaryHostForSettings &&
+                    IsWindow(m_auxiliaryHostForSettings) &&
+                    m_petWindow &&
+                    !m_petWindow->isOurWindow(m_auxiliaryHostForSettings) &&
+                    m_petWindow->isWindowFullscreen(m_auxiliaryHostForSettings)) {
+                    candidate = m_auxiliaryHostForSettings;
+                    candidateValid = true;
                 }
+
+                // 3. 无效时验证 m_lastExternalFullscreenHwnd（定时器维护的最近全屏 HWND）
+                if (!candidateValid && m_lastExternalFullscreenHwnd &&
+                    IsWindow(m_lastExternalFullscreenHwnd) &&
+                    m_petWindow &&
+                    !m_petWindow->isOurWindow(m_lastExternalFullscreenHwnd) &&
+                    m_petWindow->isWindowFullscreen(m_lastExternalFullscreenHwnd)) {
+                    candidate = m_lastExternalFullscreenHwnd;
+                    candidateValid = true;
+                }
+
+                // 4. 更新 externalFullscreenActive
+                m_effectiveExternalFullscreenHwnd = candidate;
+                m_effectiveExternalFullscreenActive = candidateValid;
+
+#else
+                Q_UNUSED(beforeActive);
+#endif
+
+                // 6. 立即应用策略（禁止先调用 refreshExternalFullscreenState）
+                applyCurrentPairedWindowPolicy();
             });
 
     // ★ 设置 → TTS 开关
@@ -751,14 +763,16 @@ void App::setupConnections()
                 switch (action) {
                 case HK::TogglePetVisibility:
                     if (m_petWindow->isVisible()) {
-                        m_petWindow->hide();
+                        // 隐藏顺序：先释放鼠标 grab → 隐藏 Proxy → 隐藏 Pet
                         if (m_inputProxyWindow) m_inputProxyWindow->hide();
+                        m_petWindow->hide();
                     } else {
+                        // 显示顺序：先 Pet → sync geometry → Proxy → 统一 Z-order
                         m_petWindow->show();
                         if (m_inputProxyWindow) {
                             m_inputProxyWindow->syncGeometry();
                             m_inputProxyWindow->show();
-                            m_inputProxyWindow->raise();
+                            syncPairedWindowZOrder();
                         }
                     }
                     break;
@@ -919,6 +933,403 @@ void App::doAutoScanCharacters()
             QStringLiteral("🔄 已检测到新角色，请切换"),
             QColor(100, 200, 255));
     }
+}
+
+// ============================================================================
+// 外部全屏权威状态管理（App 唯一所有者）
+// ============================================================================
+
+void App::openSettingsWindow()
+{
+    if (!m_settingsWindow) return;
+
+    // ── 1. 将所有当前状态推送到设置面板 ──
+    m_settingsWindow->setApiKeyConfigured(m_aiClient ? m_aiClient->hasApiKey() : false);
+    m_settingsWindow->setSnapThresholdPx(m_windowManager ? m_windowManager->snapThreshold() : 10);
+    m_settingsWindow->setIdleTimeoutMinutes(
+        m_interactionManager ? (m_interactionManager->idleTimeoutMs() / 60000) : 5);
+    m_settingsWindow->setModelScale(m_petWindow ? m_petWindow->modelScale() : 1.0);
+    m_settingsWindow->setHeadTrackingEnabled(m_petWindow ? m_petWindow->headTrackingEnabled() : false);
+    m_settingsWindow->setKeepOnTop(m_fullscreenDisplayEnabled);
+    m_settingsWindow->setTtsEnabled(m_ttsEngine && m_ttsEngine->isEnabled());
+
+    // 📸 当前截图保存路径
+    {
+        QSettings ss(QStringLiteral("DesktopPet"), QStringLiteral("Screenshot"));
+        m_settingsWindow->setScreenshotPath(ss.value(QStringLiteral("savePath")).toString());
+    }
+
+    if (m_ttsEngine) {
+        m_settingsWindow->setTtsBackend(static_cast<int>(m_ttsEngine->backend()));
+        m_settingsWindow->setAvailableVoices(
+            m_ttsEngine->availableVoices(), m_ttsEngine->voice());
+        m_settingsWindow->setVoiceVoxUrl(m_ttsEngine->voiceVoxUrl());
+
+        // 如果是 VoiceVox 后端且说话人还没缓存，触发拉取
+        if (m_ttsEngine->backend() == TtsEngine::VoiceVox
+            && m_ttsEngine->availableVoices().isEmpty()) {
+            m_settingsWindow->setVoiceVoxLoading(true);
+            m_ttsEngine->refreshVoices();
+        }
+    }
+
+    // 聊天背景状态
+    m_settingsWindow->setChatBackgroundImagePath(
+        m_chatWindow ? m_chatWindow->backgroundImagePath() : QString());
+    m_settingsWindow->setChatBackgroundOpacity(
+        m_chatWindow ? m_chatWindow->backgroundOpacity() : 0.3);
+    m_settingsWindow->setChatCropButtonEnabled(
+        m_chatWindow && !m_chatWindow->backgroundImagePath().isEmpty());
+
+    // 🎨 说话气泡颜色状态
+    {
+        QSettings ss(QStringLiteral("DesktopPet"), QStringLiteral("SpeechBubble"));
+        const QString bgColor = ss.value(QStringLiteral("bgColor")).toString();
+        const QString borderColor = ss.value(QStringLiteral("borderColor")).toString();
+        const QString textColor = ss.value(QStringLiteral("textColor")).toString();
+        if (!bgColor.isEmpty())
+            m_settingsWindow->setBubbleBgColor(QColor(bgColor));
+        if (!borderColor.isEmpty())
+            m_settingsWindow->setBubbleBorderColor(QColor(borderColor));
+        if (!textColor.isEmpty())
+            m_settingsWindow->setBubbleTextColor(QColor(textColor));
+    }
+
+    // ── 2. 选择宿主：在显示设置前捕获外部全屏窗口 ──
+#ifdef Q_OS_WIN
+    {
+        HWND fg = GetForegroundWindow();
+        bool found = false;
+
+        // 优先：当前 foreground 是有效外部全屏窗口
+        if (fg && m_petWindow &&
+            !m_petWindow->isOurWindow(fg) &&
+            m_petWindow->isWindowFullscreen(fg)) {
+            m_lastExternalForegroundHwnd = fg;
+            m_lastExternalFullscreenHwnd = fg;
+            m_auxiliaryHostForSettings   = fg;
+            found = true;
+        }
+        // 次优：验证 m_lastExternalFullscreenHwnd
+        if (!found && m_lastExternalFullscreenHwnd &&
+            IsWindow(m_lastExternalFullscreenHwnd) &&
+            m_petWindow &&
+            !m_petWindow->isOurWindow(m_lastExternalFullscreenHwnd) &&
+            m_petWindow->isWindowFullscreen(m_lastExternalFullscreenHwnd)) {
+            m_auxiliaryHostForSettings = m_lastExternalFullscreenHwnd;
+            found = true;
+        }
+        // 未找到有效全屏窗口
+        if (!found) {
+            m_auxiliaryHostForSettings = nullptr;
+        }
+
+    }
+#endif
+
+    // ── 3. 显示设置窗口 ──
+    m_settingsWindow->showAndRaise();
+}
+
+#ifdef Q_OS_WIN
+bool App::belongsToFullscreenSession(HWND foreground, HWND fullscreenHost) const
+{
+    if (!foreground || !fullscreenHost)
+        return false;
+    // 无效 HWND 立即停止（防止 GetWindowThreadProcessId 两个都返回 0 误判为同进程）
+    if (!IsWindow(foreground) || !IsWindow(fullscreenHost))
+        return false;
+    if (foreground == fullscreenHost)
+        return true;
+
+    // 1) 同进程
+    DWORD fgPid = 0, hostPid = 0;
+    GetWindowThreadProcessId(foreground, &fgPid);
+    GetWindowThreadProcessId(fullscreenHost, &hostPid);
+    if (fgPid == hostPid)
+        return true;
+
+    // 2) owner 链遍历（最大深度限制防止 HWND 循环）
+    HWND owner = GetWindow(foreground, GW_OWNER);
+    const int kMaxOwnerDepth = 32;
+    int depth = 0;
+    while (owner && depth < kMaxOwnerDepth) {
+        if (!IsWindow(owner))
+            break;
+        DWORD ownerPid = 0;
+        GetWindowThreadProcessId(owner, &ownerPid);
+        if (ownerPid == hostPid)
+            return true;
+        owner = GetWindow(owner, GW_OWNER);
+        ++depth;
+    }
+
+    // 3) root owner（GA_ROOTOWNER 返回最顶层 owner）
+    HWND rootOwner = GetAncestor(foreground, GA_ROOTOWNER);
+    if (rootOwner && rootOwner != foreground && IsWindow(rootOwner)) {
+        DWORD rootPid = 0;
+        GetWindowThreadProcessId(rootOwner, &rootPid);
+        if (rootPid == hostPid)
+            return true;
+    }
+
+    return false;
+}
+
+bool App::isSmallWindowOverFullscreenHost(HWND foreground, HWND fullscreenHost) const
+{
+    // 1) 两窗口均有效
+    if (!IsWindow(foreground) || !IsWindow(fullscreenHost))
+        return false;
+
+    // 2) fullscreenHost 仍有效全屏
+    if (!IsWindowVisible(fullscreenHost) || IsIconic(fullscreenHost))
+        return false;
+    if (!m_petWindow->isWindowFullscreen(fullscreenHost))
+        return false;
+
+    // 3) foreground 基本条件
+    if (!IsWindowVisible(foreground) || IsIconic(foreground))
+        return false;
+    if (m_petWindow->isOurWindow(foreground))
+        return false;
+    if (PetWindow::isNeutralWindow(foreground))
+        return false;
+    if (m_petWindow->isWindowFullscreen(foreground))
+        return false;
+    if (IsZoomed(foreground))
+        return false;
+
+    // 4) 同一显示器
+    HMONITOR hostMonitor = MonitorFromWindow(fullscreenHost, MONITOR_DEFAULTTONEAREST);
+    HMONITOR fgMonitor   = MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST);
+    if (!hostMonitor || !fgMonitor || hostMonitor != fgMonitor)
+        return false;
+
+    // 5) B 的窗口矩形明显小于该显示器
+    MONITORINFOEXW mi = {};
+    mi.cbSize = sizeof(mi);
+    if (!GetMonitorInfoW(hostMonitor, &mi))
+        return false;
+
+    RECT fgRect = {};
+    if (!GetWindowRect(foreground, &fgRect))
+        return false;
+
+    const int monW = mi.rcMonitor.right  - mi.rcMonitor.left;
+    const int monH = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    const int fgW  = fgRect.right - fgRect.left;
+    const int fgH  = fgRect.bottom - fgRect.top;
+
+    if (monW <= 0 || monH <= 0 || fgW <= 0 || fgH <= 0)
+        return false;
+
+    const double widthCoverage  = static_cast<double>(fgW) / monW;
+    const double heightCoverage = static_cast<double>(fgH) / monH;
+    const double areaCoverage   = (static_cast<double>(fgW) * fgH)
+                                / (static_cast<double>(monW) * monH);
+
+    if (widthCoverage >= 0.90 || heightCoverage >= 0.90 || areaCoverage >= 0.80)
+        return false;
+
+    // 6) B 的窗口矩形与 fullscreenHost 的显示器区域有实际交集
+    RECT inter = {};
+    if (!IntersectRect(&inter, &fgRect, &mi.rcMonitor))
+        return false;
+
+    return true;
+}
+#endif
+
+void App::setFullscreenDisplayEnabled(bool enabled)
+{
+    m_fullscreenDisplayEnabled = enabled;
+    QSettings(QStringLiteral("DesktopPet"), QStringLiteral("App"))
+        .setValue(QStringLiteral("fullscreenDisplay/enabled"), m_fullscreenDisplayEnabled);
+    qInfo() << "[App] 全屏显示" << (enabled ? "启用" : "禁用");
+}
+
+void App::refreshExternalFullscreenState()
+{
+#ifdef Q_OS_WIN
+    HWND fg = GetForegroundWindow();
+    m_foregroundHwnd = fg;
+
+    if (!fg) {
+        m_effectiveExternalFullscreenActive = false;
+        return;
+    }
+
+    if (!m_petWindow) {
+        m_effectiveExternalFullscreenActive = false;
+        return;
+    }
+
+    // ── 判断前台窗口是否属于本程序或是中立系统窗口 ──
+    if (!m_petWindow->isOurWindow(fg) && !PetWindow::isNeutralWindow(fg)) {
+        // ── 前台是真实外部窗口 → 实时检测 ──
+        m_lastExternalForegroundHwnd = fg;
+
+        if (m_petWindow->isWindowFullscreen(fg)) {
+            // 外部全屏窗口：更新两个 HWND
+            m_lastExternalFullscreenHwnd      = fg;
+            m_effectiveExternalFullscreenHwnd = fg;
+            m_effectiveExternalFullscreenActive = true;
+        } else {
+            // 外部普通窗口 B：在清除全屏状态前，确认 B 是否属于 A 的全屏会话
+            //（同进程 / owner 链 / rootOwner 关联 + 同显示器小窗口 + A 仍在后台有效全屏）
+
+            // ── 1. A 是否仍在后台有效全屏 ──
+            const bool hostStillFullscreen =
+                m_lastExternalFullscreenHwnd &&
+                IsWindow(m_lastExternalFullscreenHwnd) &&
+                IsWindowVisible(m_lastExternalFullscreenHwnd) &&
+                !IsIconic(m_lastExternalFullscreenHwnd) &&
+                m_petWindow->isWindowFullscreen(m_lastExternalFullscreenHwnd);
+
+            // ── 2. 只有在 A 仍全屏时才判断 B 的归属 ──
+            bool keepFullscreen           = false;
+            bool belongsByProcessOrOwner  = false;
+            bool belongsBySmallOverlay    = false;
+
+            if (hostStillFullscreen) {
+                belongsByProcessOrOwner =
+                    belongsToFullscreenSession(fg, m_lastExternalFullscreenHwnd);
+                belongsBySmallOverlay =
+                    isSmallWindowOverFullscreenHost(fg, m_lastExternalFullscreenHwnd);
+                keepFullscreen = belongsByProcessOrOwner || belongsBySmallOverlay;
+            }
+
+            if (!keepFullscreen) {
+                m_effectiveExternalFullscreenHwnd = nullptr;
+                m_effectiveExternalFullscreenActive = false;
+            }
+        }
+    } else {
+        // ── 前台是本程序窗口或中立系统窗口 ──
+        // 不直接清除外部全屏状态，优先验证缓存 HWND
+
+        HWND candidate = nullptr;
+
+        // 优先级 1: auxiliaryHostForSettings（打开设置时捕获的 foreground）
+        if (m_auxiliaryHostForSettings &&
+            IsWindow(m_auxiliaryHostForSettings) &&
+            m_petWindow->isWindowFullscreen(m_auxiliaryHostForSettings)) {
+            candidate = m_auxiliaryHostForSettings;
+        }
+        // 优先级 2: lastExternalFullscreenHwnd（定时器持续维护的最近全屏 HWND）
+        if (!candidate && m_lastExternalFullscreenHwnd &&
+            IsWindow(m_lastExternalFullscreenHwnd) &&
+            IsWindowVisible(m_lastExternalFullscreenHwnd) &&
+            !IsIconic(m_lastExternalFullscreenHwnd) &&
+            m_petWindow->isWindowFullscreen(m_lastExternalFullscreenHwnd)) {
+            candidate = m_lastExternalFullscreenHwnd;
+        }
+
+        if (candidate) {
+            m_effectiveExternalFullscreenHwnd = candidate;
+            m_effectiveExternalFullscreenActive = true;
+        } else {
+            m_effectiveExternalFullscreenHwnd = nullptr;
+            m_effectiveExternalFullscreenActive = false;
+        }
+    }
+#else
+    m_effectiveExternalFullscreenActive = false;
+#endif
+}
+
+void App::syncPairedWindowZOrder()
+{
+    if (!m_petWindow || !m_inputProxyWindow) return;
+
+    applyCurrentPairedWindowPolicy();
+}
+
+void App::applyCurrentPairedWindowPolicy()
+{
+    if (!m_petWindow || !m_inputProxyWindow) return;
+
+    const bool displayEnabled = m_fullscreenDisplayEnabled;
+
+    // ── 策略决策 ──
+    // if (!effectiveExternalFullscreenActive) → Normal
+    // else if (fullscreenDisplayEnabled) → FullscreenOverlay
+    // else → Hidden
+
+    if (!m_effectiveExternalFullscreenActive) {
+        // ── 退出全屏 → 恢复保存的可见性 ──
+        if (m_policyVisibilitySaved) {
+            if (m_savedPetVisibleForPolicy && !m_petWindow->isVisible())
+                m_petWindow->show();
+            if (m_savedProxyVisibleForPolicy && !m_inputProxyWindow->isVisible())
+                m_inputProxyWindow->show();
+            m_policyVisibilitySaved = false;
+        }
+        applyPairedWindowPolicy(PairedWindowPolicy::Normal);
+    } else if (displayEnabled) {
+        // ── 全屏覆盖：两个窗口可见 + HWND_TOPMOST ──
+        applyPairedWindowPolicy(PairedWindowPolicy::FullscreenOverlay);
+    } else {
+        // ── 全屏隐藏：保存可见性 + 同步隐藏 Pet 和 Proxy ──
+        // SettingsWindow 本身不在同步范围内
+        if (!m_policyVisibilitySaved) {
+            m_savedPetVisibleForPolicy = m_petWindow->isVisible();
+            m_savedProxyVisibleForPolicy = m_inputProxyWindow->isVisible();
+            m_policyVisibilitySaved = true;
+        }
+
+        if (m_inputProxyWindow->isVisible())
+            m_inputProxyWindow->hide();   // hideEvent → cleanupDrag
+        if (m_petWindow->isVisible())
+            m_petWindow->hide();
+    }
+}
+
+void App::applyPairedWindowPolicy(PairedWindowPolicy policy)
+{
+    if (!m_petWindow || !m_inputProxyWindow) return;
+
+#ifdef Q_OS_WIN
+    // ── 实时获取 HWND（不缓存） ──
+    HWND petHwnd   = reinterpret_cast<HWND>(m_petWindow->winId());
+    HWND proxyHwnd = reinterpret_cast<HWND>(m_inputProxyWindow->winId());
+
+    switch (policy) {
+
+    case PairedWindowPolicy::FullscreenOverlay:
+        // 显示顺序：Pet → syncGeometry → Proxy → 统一 Z-order
+        if (!m_petWindow->isVisible()) m_petWindow->show();
+        m_inputProxyWindow->syncGeometry();
+        if (!m_inputProxyWindow->isVisible()) m_inputProxyWindow->show();
+
+        // PetWindow 先设为 TOPMOST（位于 TOPMOST band 底部）
+        SetWindowPos(petHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        // InputProxyWindow 再设为 TOPMOST（位于 PetWindow 上方）
+        SetWindowPos(proxyHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        break;
+
+    case PairedWindowPolicy::Normal:
+        {
+            // Normal 策略：两窗口始终 TOPMOST，不被普通窗口遮挡
+            SetWindowPos(petHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SetWindowPos(proxyHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        break;
+
+    case PairedWindowPolicy::Hidden:
+        m_inputProxyWindow->hide();
+        m_petWindow->hide();
+        break;
+    }
+
+#else
+    Q_UNUSED(policy);
+#endif
 }
 
 void App::quit()

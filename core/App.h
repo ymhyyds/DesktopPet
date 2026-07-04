@@ -4,6 +4,10 @@
 #include <QList>
 #include <memory>
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
+
 #include "../pet/CharacterLoader.h" // for CharacterConfig
 
 // 前置声明，避免头文件互相 include 造成编译依赖爆炸。
@@ -70,7 +74,62 @@ private:
     /// characters/ 目录变更时自动重新扫描角色
     void doAutoScanCharacters();
 
+    /// 统一的双窗口 Z-order 策略
+    enum class PairedWindowPolicy {
+        FullscreenOverlay,  ///< 两个窗口同步 HWND_TOPMOST，Proxy 在 Pet 上方
+        Normal,             ///< 两个窗口始终 HWND_TOPMOST，不被普通窗口遮挡
+        Hidden              ///< 两个窗口同步隐藏
+    };
+
+    void applyPairedWindowPolicy(PairedWindowPolicy policy);
+    void syncPairedWindowZOrder();
+
+    /// 统一打开设置窗口 — 在显示前捕获外部全屏状态，避免 SettingsWindow 前台干扰
+    void openSettingsWindow();
+
+    /// 刷新 external fullscreen 权威状态（由定时器信号触发）
+    void refreshExternalFullscreenState();
+    /// 根据当前 m_effectiveExternalFullscreenActive 选择并执行策略
+    void applyCurrentPairedWindowPolicy();
+
+    /// 设置全屏时是否显示桌宠（App 权威状态，替代 PetWindow 旧方法）
+    void setFullscreenDisplayEnabled(bool enabled);
+    bool fullscreenDisplayEnabled() const { return m_fullscreenDisplayEnabled; }
+
+#ifdef Q_OS_WIN
+    /// 判断 foreground 窗口是否属于 fullscreenHost 的全屏会话
+    ///（同进程 / owner 链 / rootOwner 关联）
+    bool belongsToFullscreenSession(HWND foreground, HWND fullscreenHost) const;
+
+    /// 判断 foreground 是否是在 fullscreenHost 全屏显示器上的普通小窗口
+    ///（同显示器、非最大化、尺寸明显小于显示器、有交集）
+    bool isSmallWindowOverFullscreenHost(HWND foreground, HWND fullscreenHost) const;
+#endif
+
 private:
+    // ──── 外部全屏权威状态（App 唯一管理） ────
+#ifdef Q_OS_WIN
+    HWND  m_foregroundHwnd                      = nullptr;
+    HWND  m_lastExternalForegroundHwnd          = nullptr;
+    HWND  m_lastExternalFullscreenHwnd          = nullptr;
+    HWND  m_effectiveExternalFullscreenHwnd     = nullptr;
+#endif
+    bool  m_effectiveExternalFullscreenActive   = false;
+
+    // 进入全屏时保存的可见性
+    bool  m_savedPetVisibleForPolicy            = true;
+    bool  m_savedProxyVisibleForPolicy          = true;
+    bool  m_policyVisibilitySaved               = false;
+
+    // ──── App 权威全屏显示设置 ────
+    bool    m_fullscreenDisplayEnabled          = true;
+    QTimer *m_fullscreenCheckTimer              = nullptr;
+
+    // ──── 打开设置窗口前捕获的外部 foreground HWND ────
+#ifdef Q_OS_WIN
+    HWND    m_auxiliaryHostForSettings          = nullptr;
+#endif
+
     std::unique_ptr<CharacterLoader>   m_characterLoader;
     std::unique_ptr<MemoryDB>          m_memoryDb;
     std::unique_ptr<PromptManager>     m_promptManager;

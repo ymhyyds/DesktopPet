@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QWidget>
+#include <QCloseEvent>
 #include <QColor>
 
 class QLineEdit;
@@ -47,6 +48,7 @@ public slots:
     void showAndRaise();
 
 signals:
+    void closed();  // 窗口关闭时发射，供 App 清理 auxiliaryHost 等
     void apiKeySubmitted(const QString &apiKey);
     void snapThresholdChanged(int px);
     void idleTimeoutMinutesChanged(int minutes);
@@ -67,6 +69,9 @@ signals:
     void bubbleBgColorChanged(const QColor &color);
     void bubbleBorderColorChanged(const QColor &color);
     void bubbleTextColorChanged(const QColor &color);
+
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     void onSaveClicked();

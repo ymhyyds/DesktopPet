@@ -7,8 +7,6 @@
 #include <QColor>
 #include <QDate>
 #include <QPointer>
-#include <QTimer>
-#include <QElapsedTimer>
 #include <memory>
 
 #include "CharacterLoader.h"
@@ -36,8 +34,14 @@ public:
     void setKeepOnTop(bool keepOnTop);
     bool keepOnTop() const { return m_keepOnTop; }
 
-    void setFullscreenOverlayEnabled(bool enabled);
-    bool fullscreenOverlayEnabled() const { return m_fullscreenOverlayEnabled; }
+    // ── 全屏检测纯函数（供 App 层调用，PetWindow 不参与任何状态管理） ──
+#ifdef Q_OS_WIN
+    bool isWindowFullscreen(HWND hwnd) const;
+    bool isOurWindow(HWND hwnd) const;
+    /// 判断 HWND 是否属于不应影响外部全屏状态的中立系统窗口
+    /// （Shell_TrayWnd、Shell_SecondaryTrayWnd、Progman、WorkerW、桌面窗口等）
+    static bool isNeutralWindow(HWND hwnd);
+#endif
 
     void setHeadTrackingEnabled(bool enabled);
     bool headTrackingEnabled() const;
@@ -130,19 +134,6 @@ private:
 
     // 当前浮动文字（FloatingTextWidget，自绘制无窗口移动）
     QPointer<QWidget> m_activeFloatingText;
-
-    // ──── 全屏游戏检测 ────
-    void setupFullscreenDetection();
-    bool checkForegroundFullscreen();
-    void applyFullscreenOverlay();
-    void removeFullscreenOverlay();
-    void onFullscreenCheckTimer();
-
-    bool    m_fullscreenOverlayEnabled   = true;
-    bool    m_fullscreenGameActive       = false;
-    bool    m_fullscreenOverlayApplied   = false;
-    int     m_fullscreenConfirmCount     = 0;
-    QTimer *m_fullscreenCheckTimer       = nullptr;
 
     // ╔══════════════════════════════════════════════════════════════════════╗
     // ║  Phase 1 验证：所有 mask 方法已改为空实现                         ║

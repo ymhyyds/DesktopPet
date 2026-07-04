@@ -2364,3 +2364,127 @@ Windows 级穿透:
 | Physics / Motion / deltaTime | 物理引擎和动作系统 |
 | 浮动文字锚点修复 | 会话35 的 `BodyVisualTop` 修复已锁定 |
 | 窗口比例和 scale | `applyTightSize()` 算法 |
+
+---
+
+## 最终架构：App 统一全屏策略 + 双击交互（2026-07-04 ✅ 人工验收通过，未提交）
+
+### 全屏策略架构
+
+全屏状态由 App 唯一管理，PetWindow 仅提供几何判定纯函数。
+
+**权威状态（App 成员）：**
+
+| 状态 | 类型 | 说明 |
+|------|------|------|
+| `m_effectiveExternalFullscreenActive` | `bool` | 当前是否检测到外部全屏窗口 |
+| `m_effectiveExternalFullscreenHwnd` | `HWND` | 当前有效的全屏宿主 HWND |
+| `m_fullscreenDisplayEnabled` | `bool` | 设置项："游戏全屏时始终显示桌宠" |
+| `m_auxiliaryHostForSettings` | `HWND` | 打开设置前捕获的 foreground，防止 SettingsWindow 干扰 |
+
+**策略决策（`applyCurrentPairedWindowPolicy()`）：**
+
+```
+if (!fullscreenActive)  → Normal（保持可见，不受设置影响）
+else if (displayEnabled)→ FullscreenOverlay（双窗口 HWND_TOPMOST，Proxy 在 Pet 上方）
+else                    → Hidden（双窗口同步隐藏）
+```
+
+**双窗口 Z-order 同步（`applyPairedWindowPolicy()`）：**
+
+| Policy | 操作 |
+|--------|------|
+| FullscreenOverlay | Pet show → syncGeometry → Proxy show → Pet=TOPMOST → Proxy=TOPMOST |
+| Normal | Pet=TOPMOST → Proxy=TOPMOST（始终置顶） |
+| Hidden | Proxy hide（cleanupDrag）→ Pet hide |
+
+**检测定时器：** 100ms 间隔，`refreshExternalFullscreenState()` 获取前台 HWND → `isWindowFullscreen()` + `belongsToFullscreenSession()` + `isSmallWindowOverFullscreenHost()` 三重判定。
+
+**打开设置窗口前**捕获 `m_auxiliaryHostForSettings`（当前有效全屏宿主），避免 `SettingsWindow` 获焦点后全屏检测误清除状态。设置窗口关闭时 `SettingsWindow::closed()` 信号清理辅助宿主。
+
+### 双击交互语义
+
+双击模型实体时：**一次原交互（摸摸头/随机动作）+ 一次打开 ChatWindow**
+
+- `InputProxyWindow::mouseDoubleClickEvent` 中调用 `isInteractivePoint()` 确认命中实体
+- 交互点命中 → `m_suppressNextReleaseSingle = true`（阻止第二次 release 再触发一次交互）
+- 回落给 `InteractionManager::eventFilter` → `doubleClicked` 信号 → `isPointInModelArea` → ChatWindow
+- 确认交互点命中时同时设置 `m_pressInHeadArea`/`m_pressInBodyArea`（沿用 mouseReleaseEvent 的交互路径）
+- 清理路径（cleanupDrag、hideEvent、透明区域 miss）均清除抑制标志
+
+### 核心回归结果：全部通过 ✅
+
+| 场景 | 结果 |
+|------|------|
+| 非全屏桌宠正常显示 | ✅ |
+| 全屏 + ON 正常显示和交互 | ✅ |
+| 全屏 + OFF 正常隐藏 | ✅ |
+| 设置窗口保持打开时 ON/OFF 保存立即生效 | ✅ |
+| PetWindow 与 InputProxyWindow 同步 | ✅ |
+| 双击交互（原交互 + 打开聊天） | ✅ |
+
+### 已接受的已知限制
+
+**全屏游戏期间打开普通小窗口，模型可能概率性短暂出现。**
+100ms 定时器两滴答之间（从全屏窗口 A → 附属小窗口 B → 再判定归属）可能导致模型闪现。`belongsToFullscreenSession()` 覆盖同进程/owned 窗口场景；无关进程面板不命中，模型可能短暂出现。`FullscreenDebounce` 未实施（优先级低）。
+
+**任务栏自动隐藏时最大化窗口被判定为全屏。**
+`isWindowFullscreen()` 使用客户区 + 外框双重检测。任务栏自动隐藏时 `rcMonitor == rcWork`，最大化浏览器客户区覆盖完整显示器，与 F11 无差异。不影响正常全屏游戏场景。
+
+### 稳定基线
+
+- 提交：`f54447a` (`v0.3.0-stable-input-proxy`)
+- 当前工作区：全屏策略 + 双击交互已通过人工验收，尚未提交
+
+---
+
+## 当前工作区状态（2026-07-04 — 进行中）
+
+### 任务状态
+
+| # | 任务 | 状态 |
+|:-:|:-----|:----:|
+| 1 | 整理 PROJECT_CONTEXT.md 删除重复内容 | 🔄 进行中 |
+| 2 | 检查调试日志清理是否完整 | ⏳ 待做 |
+| 3 | Release 构建 + 快速回归 | ⏳ 待做 |
+| 4 | 分成两个提交 | ⏳ 待做 |
+| 5 | 清理 patch 文件 | ⏳ 待做 |
+| 6 | 输出最终报告 | ⏳ 待做 |
+
+### 当前 git 状态
+
+```
+ M PROJECT_CONTEXT.md
+ M core/App.cpp
+ M core/App.h
+ M interaction/InputProxyWindow.cpp
+ M interaction/InputProxyWindow.h
+ M pet/PetWindow.cpp
+ M pet/PetWindow.h
+ M settings/SettingsWindow.cpp
+ M settings/SettingsWindow.h
+?? fullscreen_state_verified.patch
+?? fullscreen_state_wip.patch
+```
+
+### 临时文件
+
+- `fullscreen_state_wip.patch` (101507 bytes)
+- `fullscreen_state_verified.patch` (151924 bytes)
+- **两者均不得提交**
+
+### 构建状态
+
+**未验证。** 需先构建确认无误后再提交。
+
+### 规范约束
+
+| 模块 | 约束 |
+|:-----|:------|
+| PetWindow `WindowTransparentForInput` | 永久输入穿透，不可取消 |
+| InputProxyWindow 事件转发 | 事件映射已验证通过，不可修改 |
+| 智能穿透结构 | 双窗口分离方案已锁定 |
+| Live2D / Physics / Motion | 不修改 |
+| 浮动文字 | 不修改 |
+
+**未提交。禁止 reset / revert / checkout / stash / apply patch。**

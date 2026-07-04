@@ -13,7 +13,6 @@
 #include <QPropertyAnimation>
 #include <QSequentialAnimationGroup>
 #include <QEasingCurve>
-#include <QTimer>
 #include <QDateTime>
 #include <QTime>
 #include <QDir>
@@ -41,13 +40,10 @@ PetWindow::PetWindow(const CharacterConfig &initialConfig, QWidget *parent)
     setAttribute(Qt::WA_TranslucentBackground, true);
     setAutoFillBackground(false);
 
-    // ★ Phase 1: 暂不安装原生事件过滤器（移除了 mask，统一由 InputProxyWindow 处理）
-    // 注：保留 install 但 nativeEventFilter 改为始终返回 HTTRANSPARENT，实现全窗口穿透
+    // nativeEventFilter → HTTRANSPARENT 实现全窗口穿透
 #if defined(Q_OS_WIN)
     qApp->installNativeEventFilter(this);
 #endif
-
-    // ★ Phase 1: mask 定时器已移除（setMask/SetWindowRgn 不再使用）
 
     m_live2DView = new Live2DView(this);
     m_live2DView->setGeometry(rect());
@@ -60,7 +56,6 @@ PetWindow::PetWindow(const CharacterConfig &initialConfig, QWidget *parent)
         m_canvasHeight = ch;
         applyTightSize();
         emit modelSizeLoaded();
-        // ★ Phase 1: mask 已移除 — 无闪烁
     });
 
     // idle 稳定后的包围盒更接近视觉大小，覆盖初始姿态的值
@@ -68,14 +63,12 @@ PetWindow::PetWindow(const CharacterConfig &initialConfig, QWidget *parent)
         m_tightModelWidth  = tightW;
         m_tightModelHeight = tightH;
         applyTightSize();
-        // ★ Phase 1: mask 已移除
     });
 
     // 好感度变化 在 contextMenuEvent 中与操作文字合并显示，避免重叠
 
     // 点击模型头部 → 摸摸头
     connect(m_live2DView, &Live2DView::headClicked, this, [this]() {
-        // ★ Phase 1: markMaskDirty 已移除（无 mask）
         triggerPet();
     });
 
@@ -92,15 +85,10 @@ PetWindow::PetWindow(const CharacterConfig &initialConfig, QWidget *parent)
 
     applyCharacter(initialConfig);
 
-    // 全屏游戏检测
-    setupFullscreenDetection();
 }
 
 PetWindow::~PetWindow()
 {
-    if (m_fullscreenCheckTimer) {
-        m_fullscreenCheckTimer->stop();
-    }
     delete m_speechBubble;
 }
 
@@ -163,8 +151,6 @@ void PetWindow::setModelScale(double scale)
              static_cast<int>(centerY - height() / 2.0));
     }
 
-    // ★ Phase 1: markMaskDirty 已移除（无 mask）
-
     saveState();
 
     emit modelScaleChanged(scale);
@@ -196,32 +182,6 @@ void PetWindow::applyTightSize()
 
     if (m_live2DView) {
         m_live2DView->setGeometry(rect());
-    }
-
-    // ★ 记录实际 resize 结果，用于排查宽度卡住
-    if (actualW != newW || actualH != newH) {
-        QFile f(QStringLiteral("live2d_debug_log.txt"));
-        if (f.open(QIODevice::Append | QIODevice::Text)) {
-            QTextStream s(&f);
-            s << QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz"))
-              << " [resize] scale=" << m_currentModelScale
-              << " 期望=" << newW << "x" << newH
-              << " 实际=" << actualW << "x" << actualH
-              << " 旧=" << oldW << "x" << oldH
-              << " tight=" << m_tightModelWidth << "x" << m_tightModelHeight
-              << " basePx=" << basePx << " aspect=" << QString::number(aspect, 'f', 4)
-              << " modelW=" << modelW << " modelH=" << modelH
-              << "\n";
-        }
-    } else {
-        QFile f(QStringLiteral("live2d_debug_log.txt"));
-        if (f.open(QIODevice::Append | QIODevice::Text)) {
-            QTextStream s(&f);
-            s << QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss.zzz"))
-              << " [resize] scale=" << m_currentModelScale
-              << " " << actualW << "x" << actualH
-              << " basePx=" << basePx << " aspect=" << QString::number(aspect, 'f', 4) << "\n";
-        }
     }
 }
 
@@ -269,151 +229,42 @@ void PetWindow::triggerPet()
 void PetWindow::setKeepOnTop(bool keepOnTop)
 {
     m_keepOnTop = keepOnTop;
-#ifdef Q_OS_WIN
-    HWND hwnd = reinterpret_cast<HWND>(effectiveWinId());
-    SetWindowPos(hwnd,
-                 keepOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
-                 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-#else
-    setWindowFlag(Qt::WindowStaysOnTopHint, keepOnTop);
-    show();
-#endif
     QSettings(QStringLiteral("DesktopPet"), QStringLiteral("PetWindow"))
         .setValue(QStringLiteral("window/keepOnTop"), m_keepOnTop);
-
-    qInfo() << "[PetWindow] 置顶" << (keepOnTop ? "开启" : "关闭");
+    // Z-order 由 App::applyPairedWindowPolicy() 统一管理
 }
 
-// ---------------------------------------------------------------------------
-// 全屏游戏覆盖：仅在前台窗口真正全屏时强制置顶
-// ---------------------------------------------------------------------------
-
-void PetWindow::setFullscreenOverlayEnabled(bool enabled)
-{
-    m_fullscreenOverlayEnabled = enabled;
-
-    QSettings(QStringLiteral("DesktopPet"), QStringLiteral("PetWindow"))
-        .setValue(QStringLiteral("fullscreenOverlay/enabled"), m_fullscreenOverlayEnabled);
-
-    qInfo() << "[FullscreenOverlay] 游戏全屏覆盖" << (enabled ? "启用" : "禁用");
-
-    // 立即响应状态变化
-    onFullscreenCheckTimer();
-}
-
-void PetWindow::setupFullscreenDetection()
-{
-    m_fullscreenCheckTimer = new QTimer(this);
-    m_fullscreenCheckTimer->setInterval(200);          // 200ms 检测间隔
-    connect(m_fullscreenCheckTimer, &QTimer::timeout,
-            this, &PetWindow::onFullscreenCheckTimer);
-    m_fullscreenCheckTimer->start();
-}
-
-void PetWindow::onFullscreenCheckTimer()
-{
-    // 功能未启用 → 清除覆盖状态
-    if (!m_fullscreenOverlayEnabled) {
-        if (m_fullscreenOverlayApplied) {
-            removeFullscreenOverlay();
-        }
-        m_fullscreenConfirmCount = 0;
-        m_fullscreenGameActive = false;
-        return;
-    }
-
-    const bool isFs = checkForegroundFullscreen();
-
-    // 仅状态变化时记录日志，避免刷屏
-    static bool lastIsFs = false;
-    if (isFs != lastIsFs) {
-        qInfo() << "[FullscreenOverlay] 检测到全屏状态变化:"
-                << (isFs ? "全屏" : "非全屏")
-                << "count=" << m_fullscreenConfirmCount
-                << "applied=" << m_fullscreenOverlayApplied
-                << "active=" << m_fullscreenGameActive;
-        lastIsFs = isFs;
-    }
-
-    if (isFs) {
-        // 防抖：连续确认 3 次（600ms）后才应用
-        if (m_fullscreenConfirmCount < 3)
-            m_fullscreenConfirmCount++;
-
-        if (m_fullscreenConfirmCount >= 3 && !m_fullscreenOverlayApplied) {
-            applyFullscreenOverlay();
-        }
-    } else {
-        // 连续确认不满足后清除
-        if (m_fullscreenConfirmCount > 0)
-            m_fullscreenConfirmCount--;
-
-        if (m_fullscreenConfirmCount <= 0 && m_fullscreenOverlayApplied) {
-            removeFullscreenOverlay();
-        }
-    }
-}
-
-void PetWindow::applyFullscreenOverlay()
-{
-    if (m_fullscreenOverlayApplied)
-        return;
-
-    qInfo() << "[FullscreenOverlay] 全屏游戏检测到 (+"
-            << m_fullscreenConfirmCount << "次确认)，应用覆盖 (HWND="
-            << Qt::hex << static_cast<quintptr>(effectiveWinId()) << Qt::dec << ")";
+// ============================================================================
+// 全屏检测纯函数 — PetWindow 不维护任何全屏状态，仅提供几何判定
+// ============================================================================
 
 #ifdef Q_OS_WIN
-    HWND hwnd = reinterpret_cast<HWND>(effectiveWinId());
-    // 只使用 SetWindowPos(HWND_TOPMOST) 修改 Z-order，不调用 raise()
-    // raise() 会经 requestActivate() 调用 SetForegroundWindow，抢走游戏焦点
-    // → 下一帧检测认为游戏不是前台窗口 → 覆盖被撤销 → 桌宠掉回游戏下方
-    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-#endif
-
-    m_fullscreenOverlayApplied = true;
-    m_fullscreenGameActive = true;
+bool PetWindow::isOurWindow(HWND hwnd) const
+{
+    DWORD ourPid = GetCurrentProcessId();
+    DWORD winPid = 0;
+    GetWindowThreadProcessId(hwnd, &winPid);
+    return winPid == ourPid;
 }
 
-void PetWindow::removeFullscreenOverlay()
+bool PetWindow::isWindowFullscreen(HWND hwnd) const
 {
-    if (!m_fullscreenOverlayApplied)
-        return;
-
-    qInfo() << "[FullscreenOverlay] 全屏游戏退出，恢复状态 (HWND="
-            << Qt::hex << static_cast<quintptr>(effectiveWinId()) << Qt::dec
-            << ", m_keepOnTop=" << m_keepOnTop << ")";
-
-    m_fullscreenOverlayApplied = false;
-    m_fullscreenGameActive = false;
-
-#ifdef Q_OS_WIN
-    HWND hwnd = reinterpret_cast<HWND>(effectiveWinId());
-    // 恢复到用户的基础置顶偏好（不主动隐藏窗口，不抢焦点）
-    SetWindowPos(hwnd,
-                 m_keepOnTop ? HWND_TOPMOST : HWND_NOTOPMOST,
-                 0, 0, 0, 0,
-                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-#endif
-}
-
-bool PetWindow::checkForegroundFullscreen()
-{
-#ifdef Q_OS_WIN
-    HWND hwnd = GetForegroundWindow();
+    // 1. 基本有效性检查
     if (!hwnd || !IsWindowVisible(hwnd) || IsIconic(hwnd))
         return false;
 
-    // 排除桌宠自身窗口
+    // 2. 排除 cloaked（被 DWM 隐藏的窗口）
+    BOOL cloaked = FALSE;
+    if (SUCCEEDED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked, sizeof(cloaked))) && cloaked)
+        return false;
+
+    // 3. 排除桌宠自身
     if (hwnd == reinterpret_cast<HWND>(effectiveWinId()))
         return false;
 
-    // 排除桌面/Shell 窗口
+    // 4. 排除桌面 / Shell / 任务栏
     if (hwnd == GetShellWindow())
         return false;
-
     wchar_t className[256] = {};
     if (GetClassNameW(hwnd, className, 256)) {
         if (wcscmp(className, L"Shell_TrayWnd") == 0 ||
@@ -422,49 +273,91 @@ bool PetWindow::checkForegroundFullscreen()
             return false;
     }
 
-    // 获取前台窗口所在显示器
+    // 5. 获取显示器信息
     HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
     MONITORINFO mi = { sizeof(MONITORINFO) };
     if (!GetMonitorInfoW(monitor, &mi))
         return false;
+    const RECT &monRect = mi.rcMonitor;
 
-    // 使用 rcMonitor（完整显示器区域，含任务栏），不用 rcWork
-    const RECT &mon = mi.rcMonitor;
+    // 6. 客户区 rect → 屏幕坐标（核心判断依据）
+    RECT cr = {};
+    if (!GetClientRect(hwnd, &cr))
+        return false;
+    POINT crTL = { cr.left, cr.top };
+    POINT crBR = { cr.right, cr.bottom };
+    ClientToScreen(hwnd, &crTL);
+    ClientToScreen(hwnd, &crBR);
+    RECT clientScreenRect = { crTL.x, crTL.y, crBR.x, crBR.y };
 
-    // 优先 DwmGetWindowAttribute 获取真实窗口边界（含 DWM 扩展框架）
+    // 7. 窗口矩形
     RECT winRect = {};
-    HRESULT hr = DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS,
-                                       &winRect, sizeof(winRect));
-    if (FAILED(hr)) {
-        // Fallback 到 GetWindowRect
-        if (!GetWindowRect(hwnd, &winRect))
-            return false;
-    }
+    if (!GetWindowRect(hwnd, &winRect))
+        return false;
 
-    // 容差 3 物理像素（处理 DPI 和边框误差）
-    constexpr int tolerance = 3;
-    return (winRect.left   <= mon.left   + tolerance &&
-            winRect.top    <= mon.top    + tolerance &&
-            winRect.right  >= mon.right  - tolerance &&
-            winRect.bottom >= mon.bottom - tolerance);
-#else
-    return false;
-#endif
+    // 8. DWM 扩展边框
+    RECT extBounds = {};
+    bool extBoundsValid = SUCCEEDED(DwmGetWindowAttribute(
+        hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &extBounds, sizeof(extBounds)));
+
+    // ── 全屏判定 ──
+
+    // (A) 客户区四条边必须接近 monitorRect（容差 6px = ~99% 覆盖率）
+    constexpr int CT = 6;
+    bool clientCovers =
+        (clientScreenRect.left   <= monRect.left   + CT) &&
+        (clientScreenRect.top    <= monRect.top    + CT) &&
+        (clientScreenRect.right  >= monRect.right  - CT) &&
+        (clientScreenRect.bottom >= monRect.bottom - CT);
+
+    if (!clientCovers)
+        return false;
+
+    // (B) 外框或扩展边框也覆盖 monitorRect（容差 8px 处理 DWM 阴影偏移）
+    constexpr int WT = 8;
+    bool winCovers =
+        (winRect.left   <= monRect.left   + WT) &&
+        (winRect.top    <= monRect.top    + WT) &&
+        (winRect.right  >= monRect.right  - WT) &&
+        (winRect.bottom >= monRect.bottom - WT);
+
+    bool extCovers = extBoundsValid &&
+        (extBounds.left   <= monRect.left   + WT) &&
+        (extBounds.top    <= monRect.top    + WT) &&
+        (extBounds.right  >= monRect.right  - WT) &&
+        (extBounds.bottom >= monRect.bottom - WT);
+
+    if (!winCovers && !extCovers)
+        return false;
+
+    return true;
 }
+
+bool PetWindow::isNeutralWindow(HWND hwnd)
+{
+    if (!hwnd) return false;
+    // 桌面窗口
+    if (hwnd == GetShellWindow())
+        return true;
+    wchar_t className[256] = {};
+    if (!GetClassNameW(hwnd, className, 256))
+        return false;
+    return wcscmp(className, L"Shell_TrayWnd") == 0 ||
+           wcscmp(className, L"Shell_SecondaryTrayWnd") == 0 ||
+           wcscmp(className, L"WorkerW") == 0 ||
+           wcscmp(className, L"Progman") == 0;
+}
+#endif // Q_OS_WIN
 
 #if defined(Q_OS_WIN)
 bool PetWindow::nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result)
 {
     MSG *msg = static_cast<MSG *>(message);
     if (msg->message == WM_NCHITTEST) {
-        // 只确认 HWND 属于 PetWindow 层级
         if (msg->hwnd != reinterpret_cast<HWND>(winId())
             && !::IsChild(reinterpret_cast<HWND>(winId()), msg->hwnd)) {
             return false;
         }
-
-        // ★ Phase 1: 全窗口穿透（HTTRANSPARENT），不拦截任何鼠标事件
-        //   PetWindow 只负责渲染，输入由 InputProxyWindow 处理
         *result = HTTRANSPARENT;
         return true;
     }
@@ -609,42 +502,15 @@ void PetWindow::updateSpeechBubblePosition()
 }
 
 // ============================================================================
-// ★ Phase 1: 所有 mask 方法已临时移除
-// setMask/SetWindowRgn 同时裁剪 OpenGL 渲染输出 → 切换模型闪烁 + 持续运动裁剪
-// 移除后验证闪烁和裁剪是否消失，后续由 InputProxyWindow 独立负责输入穿透
+// 空实现 — mask 由 InputProxyWindow 独立负责
 // ============================================================================
 
-void PetWindow::updateModelMask()
-{
-    // Phase 1: 空实现 — 不再调用 clearMask/setMask
-}
-
-void PetWindow::clearMaskAndCache()
-{
-    // Phase 1: 空实现
-}
-
-void PetWindow::applyMaskRegion(const QRegion &region, int drawableCount)
-{
-    Q_UNUSED(region); Q_UNUSED(drawableCount);
-    // Phase 1: 空实现
-}
-
-QRegion PetWindow::dilateRegion(const QRegion &region, int px)
-{
-    Q_UNUSED(px);
-    return region; // Phase 1: 直接返回原始区域
-}
-
-void PetWindow::onMaskTimer()
-{
-    // Phase 1: 空实现 — 定时器仍存在但无操作
-}
-
-void PetWindow::markMaskDirty()
-{
-    // Phase 1: 空实现
-}
+void PetWindow::updateModelMask() {}
+void PetWindow::clearMaskAndCache() {}
+void PetWindow::applyMaskRegion(const QRegion &, int) {}
+QRegion PetWindow::dilateRegion(const QRegion &region, int) { return region; }
+void PetWindow::onMaskTimer() {}
+void PetWindow::markMaskDirty() {}
 
 void PetWindow::setSpeechBubbleBgColor(const QColor &color)
 {
@@ -691,7 +557,7 @@ void PetWindow::saveState()
 
     settings.setValue(QStringLiteral("window/modelScale"), m_currentModelScale);
 
-    settings.setValue(QStringLiteral("fullscreenOverlay/enabled"), m_fullscreenOverlayEnabled);
+    // 全屏状态由 App 管理（m_fullscreenDisplayEnabled 在 App::setFullscreenDisplayEnabled 中持久化）
 
     settings.setValue(QStringLiteral("background/path"), m_backgroundImagePath);
     settings.setValue(QStringLiteral("background/sourcePath"), m_backgroundSourcePath);
@@ -702,12 +568,7 @@ void PetWindow::loadState()
 {
     QSettings settings(QStringLiteral("DesktopPet"), QStringLiteral("PetWindow"));
 
-    // 全屏覆盖设置：从新键读取，兼容迁移旧的 window/keepOnTop
-    m_fullscreenOverlayEnabled = settings.value(
-        QStringLiteral("fullscreenOverlay/enabled"),
-        settings.value(QStringLiteral("window/keepOnTop"), true).toBool()
-    ).toBool();
-
+    // 全屏覆盖设置在 App 中管理，PetWindow 不再读取 fullscreenOverlay/enabled
     m_keepOnTop = settings.value(QStringLiteral("window/keepOnTop"), true).toBool();
 
     // 恢复用户上次手动调整的缩放值；首次启动 / 配置异常时 fallback 1.0
@@ -1008,7 +869,6 @@ void PetWindow::resizeEvent(QResizeEvent *event)
     if (m_live2DView) {
         m_live2DView->setGeometry(rect());
     }
-    // ★ Phase 1: mask 相关调用已移除
 }
 
 void PetWindow::paintEvent(QPaintEvent *event)

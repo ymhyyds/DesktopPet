@@ -531,6 +531,12 @@ void SettingsWindow::setBubbleTextColor(const QColor &color)
     }
 }
 
+void SettingsWindow::closeEvent(QCloseEvent *event)
+{
+    emit closed();
+    QWidget::closeEvent(event);
+}
+
 void SettingsWindow::showAndRaise()
 {
     // 1. 还原最小化状态（如果窗口被最小化了）
