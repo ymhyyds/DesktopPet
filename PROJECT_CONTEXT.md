@@ -1,6 +1,8 @@
 # DesktopPet 项目上下文
 
-> 最后更新: 2026-07-03 (会话25 — 模型启动缩放默认 1.0 + 用户调整持久化)
+> 最后更新: 2026-07-05 (阶段1 — 全部完成，所有 19 项测试通过)
+> 当前分支: feature/edge-tts-voicevox-only
+> 阶段1 完成度: 代码修改 100%, 迁移测试 100%, Release 构建 100%, 单元测试 100% (19/19)
 > 项目路径: `C:\Users\余敏涵\Desktop\DesktopPet`
 
 ---
@@ -8,6 +10,73 @@
 ## 项目概览
 
 一个基于 Qt6 + Live2D Cubism SDK 的桌面宠物程序，**纯 Live2D 模式**。
+
+### ★ 阶段1 — TTS 重构（feature/edge-tts-voicevox-only）
+
+**状态：代码完成，Release 构建通过，迁移验证通过，运行时测试待补做。**
+
+#### 已完成
+
+| 改动 | 文件 |
+|------|------|
+| 移除 SAPI 后端（PowerShell System.Speech、SpeechSynthesizer、Media.SoundPlayer） | `ai/TtsEngine.*` |
+| 移除 SAPI UI（后端下拉"PowerShell SAPI"） | `settings/SettingsWindow.cpp` |
+| 移除 SAPI QSettings key `sapiVoice` | `ai/TtsEngine.cpp`（迁移） |
+| 仅保留 Backend::EdgeTts(0) / Backend::VoiceVox(1) | `ai/TtsEngine.h` |
+| 默认后端改为 EdgeTts | `ai/TtsEngine.h` |
+| backendSchemaVersion=2 迁移（原子写入，sapiVoice 删除，vv* 保留） | `ai/TtsEngine.cpp`（构造） |
+| 迁移测试全部 5 项通过（旧 SAPI→EdgeTts, 旧 VV→VV, 无效→EdgeTts, schema=2 透传) | 用真实 registry + app 启动验证 |
+| Qt6::Multimedia 接入（CMake find_package + link） | `CMakeLists.txt` |
+| QMediaPlayer + QAudioOutput 统一播放层 | `ai/TtsEngine.*` |
+| VoiceVox WAV 改用 Qt Multimedia 播放（移除 PowerShell Media.SoundPlayer） | `ai/TtsEngine.cpp` |
+| VoiceVoxClient::synthesize(text, styleId, **requestId**) | `ai/VoiceVoxClient.*` |
+| audioReady(**requestId**, wavData) / requestFailed(**requestId**, reason) | `ai/VoiceVoxClient.*` |
+| cancelPendingRequests() — abort + deleteLater + 快照复制 | `ai/VoiceVoxClient.*` |
+| latest-wins 并发策略（m_generation++ + stop 旧请求 + 取消旧 pending） | `ai/TtsEngine.cpp` |
+| 临时文件安全清理（DesktopPetTts/pid/requestId/，播放结束/error/stop 时清理） | `ai/TtsEngine.cpp` |
+| Edge TTS CLI 占位 | `ai/TtsEngine.cpp`（speak 中 log 提示未实现） |
+| 测试基础设施 | `tests/`（mock server、QtTest target） |
+
+#### 待完成（阶段1 提交前）
+
+- [x] 补做运行时测试（使用 `tests/MockVoiceVoxServer.py` mock HTTP 服务）
+- [x] 测试项：单次合成、latest-wins、cancelPending、stop/disable、HTTP 错误、连续请求、退出清理
+- [x] 全部 19 项测试通过（VoiceVoxClientTest 11/11, TtsEngineTest 8/8）
+- [ ] 提交阶段1，commit message: `refactor: replace legacy TTS playback foundation`
+
+#### 待完成（阶段2）
+
+- [ ] Edge TTS CLI 接入（QProcess + edge-tts.exe）
+- [ ] 插件发现 5 级优先级
+- [ ] Edge 合成 30 秒超时
+- [ ] SettingsWindow Edge 设置面板（音色、语速、音量、音高、路径、测试）
+
+#### 已移除
+
+- `enum Backend::SAPI`（值 0 被 `EdgeTts` 取代，语义不同但数值相同）
+- PowerShell `System.Speech.SpeechSynthesizer` 常驻进程
+- PowerShell `Media.SoundPlayer.PlaySync()` WAV 播放
+- `querySapiVoices()` / `GetInstalledVoices()` / `SelectVoice`
+- 设置项 `sapiVoice`
+- 后端下拉"PowerShell SAPI（系统语音）"
+
+#### 迁移规则
+
+```
+backendSchemaVersion 不存在 → 视为 version 1
+version < 2:
+  backend=0 (旧 SAPI)  → EdgeTts
+  backend=1 (旧 VV)     → VoiceVox
+  其他                  → EdgeTts
+version ≥ 2:
+  backend=0 → EdgeTts
+  backend=1 → VoiceVox
+  其他      → EdgeTts
+
+原子写入: backend + backendSchemaVersion=2
+删除: sapiVoice
+保留: vvUrl, vvStyleId, vvVoiceName
+```
 
 - 🦊 桌宠窗口（无边框透明、左键拖拽、贴边吸附、右下角固定）
 - 🎨 Live2D 模型渲染（Cubism SDK 5 R6，QOpenGLWidget 集成）
@@ -18,7 +87,7 @@
 - 🔄 角色切换（托盘菜单选择，自动扫描新模型）
 - 🖱 鼠标交互（左键拖拽、右键互动菜单、**双击开聊天需在模型区域内才触发**、**松手才触发摸摸头**、点击身体播放随机动画）
 - ❤️ 好感度系统（右键互动累积，满值 300，QSettings 持久化）
-- 🗣️ **TTS 双后端：PowerShell SAPI + VoiceVox 二次元语音（热切换）**
+- 🗣️ **TTS 统一播放：Edge TTS + VoiceVox 双后端（Qt Multimedia 统一输出，latest-wins 并发）**
 - 🔎 **对话搜索：SQLite LIKE 模糊匹配，逐条浏览**
 - 📤 **对话导出：.txt / .json / .html 三种格式**
 - 🌤️ 时间/天气感知（实时时间注入，wttr.in 天气）
@@ -97,8 +166,8 @@ DesktopPet/
 │   ├── DeepSeekClient    # DeepSeek API 异步客户端（流式）
 │   ├── PromptManager     # ★ 人格 Prompt + 实时时间/天气注入
 │   ├── EmotionAnalyzer   # 关键词 → 情绪映射
-│   ├── TtsEngine         # ★ TTS 双后端：SAPI（PowerShell）/ VoiceVox（HTTP API）
-│   └── VoiceVoxClient    # ★ VoiceVox HTTP API（说话人查询 + 语音合成）
+│   ├── TtsEngine         # ★ TTS 双后端：Edge TTS（QProcess CLI）/ VoiceVox（HTTP API），QMediaPlayer 统一播放
+│   └── VoiceVoxClient    # ★ VoiceVox HTTP API（说话人查询 + 语音合成 + requestId + cancelPendingRequests）
 
 ├── memory/
 │   └── MemoryDB          # SQLite 持久化 + 搜索方法 + 全部消息加载 + clearMessages()
@@ -408,7 +477,7 @@ DeepSeek API Key
   [■背景色] [■边框色] [■文字色]  并排
 交互设置
   [开启点击穿透] [头部跟随鼠标] [开启语音朗读] [游戏全屏始终显示]
-  语音后端: SAPI / VoiceVox
+  语音后端: Edge TTS / VoiceVox
   语音选择: 下拉
   VoiceVox 地址:
   贴边吸附距离: N px
@@ -499,9 +568,9 @@ cd ../.. → 项目根目录
 
 1. **模型画布是抽象单位**：Hiyori 的 `GetCanvasWidth/Height()` 返回 1×1.403（非像素）。小越 canvas 1×2.25。
 2. **ChatWindow 初始化顺序**：`setCharacterName()` 必须在构造之后调用。
-3. **★ TTS 编码**：PowerShell 进程的 stdin 必须设置 `InputEncoding = UTF8`，否则中文朗读乱码。
+3. **★ TTS 编码**：（已废弃 — SAPI/PowerShell 已移除）
 4. **★ 浮动文字独立窗口**：QLabel 作为子控件会被父窗口裁剪，必须创建独立顶层弹出窗口。
-5. **★ VoiceVox 音频播放**：`Media.SoundPlayer.PlaySync()` 播临时 WAV，播完自动删。
+5. **★ VoiceVox 音频播放**：（已废弃 — 改用 QMediaPlayer 统一播放）
 6. **★ ChatWindow DB key 不匹配**：`m_characterName` 是显示名，`m_characterKey` 才是文件夹名，DB 查询必须用后者。
 7. **★ 游戏全屏置顶用 Win32 API**：`SetWindowPos` + `HWND_TOPMOST`，不能用 `setWindowFlags()` 否则 OpenGL 上下文丢失。
 8. **★ 裁剪持久化到 AppData**：裁剪结果存 `%APPDATA%/DesktopPetProject/DesktopPet/chat_bg_cropped.png`。
@@ -2556,12 +2625,12 @@ else                    → Hidden（双窗口同步隐藏）
 
 | 问题 | 范围 | 决策 |
 |------|------|------|
-| SAPI 仅第一次播放语音 | **仅 SAPI PowerShell 后端** — COM STA 线程模型导致 `$s.Speak()` 第二次无声 | **停止修复**，由 Edge TTS 替换 |
+| SAPI 仅第一次播放语音 | **仅 SAPI PowerShell 后端** — COM STA 线程模型导致 `$s.Speak()` 第二次无声 | **已修复**：SAPI 已移除，替代为 Edge TTS |
 | VoiceVox / 公共 TtsEngine 状态 | **不受影响** — HTTP API 独立路径，引擎生命周期正常 | — |
 
 ### 下一阶段任务（按优先级）
 
-1. **移除 SAPI，接入 Edge TTS**（HTTP API，无进程/COM 依赖）
+1. **移除 SAPI，第一阶段已完成**（SAPI 已完全移除，VoiceVox 已迁移到 QMediaPlayer 统一播放，Edge TTS CLI 待接入）
 2. VoiceVox 播放队列 + 后端切换取消
 3. 右键菜单事件重置挂机计时器
 

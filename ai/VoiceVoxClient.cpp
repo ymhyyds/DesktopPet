@@ -15,7 +15,10 @@ VoiceVoxClient::VoiceVoxClient(QObject *parent)
     m_net = new QNetworkAccessManager(this);
 }
 
-VoiceVoxClient::~VoiceVoxClient() = default;
+VoiceVoxClient::~VoiceVoxClient()
+{
+    cancelPendingRequests();
+}
 
 void VoiceVoxClient::setBaseUrl(const QString &url)
 {
@@ -80,7 +83,7 @@ void VoiceVoxClient::onSpeakersReply(const QByteArray &data)
 // ============================================================================
 // 语音合成（两步：audio_query → synthesis）
 // ============================================================================
-void VoiceVoxClient::synthesize(const QString &text, int styleId)
+void VoiceVoxClient::synthesize(const QString &text, int styleId, int requestId)
 {
     // Step 1: POST /audio_query
     QUrl queryUrl(m_baseUrl + QStringLiteral("/audio_query"));
@@ -93,11 +96,14 @@ void VoiceVoxClient::synthesize(const QString &text, int styleId)
     req.setRawHeader("Accept", "application/json");
 
     QNetworkReply *queryReply = m_net->post(req, QByteArray());
-    connect(queryReply, &QNetworkReply::finished, this, [this, queryReply, text, styleId]() {
+    m_pendingReplies.append(queryReply);
+
+    connect(queryReply, &QNetworkReply::finished, this, [this, queryReply, text, styleId, requestId]() {
+        m_pendingReplies.removeOne(queryReply);
         queryReply->deleteLater();
 
         if (queryReply->error() != QNetworkReply::NoError) {
-            emit networkError(QStringLiteral("audio_query 失败: %1").arg(queryReply->errorString()));
+            emit requestFailed(requestId, QStringLiteral("audio_query 失败: %1").arg(queryReply->errorString()));
             return;
         }
 
@@ -114,21 +120,39 @@ void VoiceVoxClient::synthesize(const QString &text, int styleId)
         synthReq.setRawHeader("Content-Type", "application/json");
 
         QNetworkReply *synthReply = m_net->post(synthReq, queryJson);
-        connect(synthReply, &QNetworkReply::finished, this, [this, synthReply]() {
+        m_pendingReplies.append(synthReply);
+
+        connect(synthReply, &QNetworkReply::finished, this, [this, synthReply, requestId]() {
+            m_pendingReplies.removeOne(synthReply);
             synthReply->deleteLater();
 
             if (synthReply->error() != QNetworkReply::NoError) {
-                emit networkError(QStringLiteral("synthesis 失败: %1").arg(synthReply->errorString()));
+                emit requestFailed(requestId, QStringLiteral("synthesis 失败: %1").arg(synthReply->errorString()));
                 return;
             }
 
             const QByteArray wav = synthReply->readAll();
             if (wav.isEmpty()) {
-                emit networkError(QStringLiteral("synthesis 返回空数据"));
+                emit requestFailed(requestId, QStringLiteral("synthesis 返回空数据"));
                 return;
             }
 
-            emit audioReady(wav);
+            emit audioReady(requestId, wav);
         });
     });
+}
+
+// ============================================================================
+// 取消所有进行中的请求
+// ============================================================================
+void VoiceVoxClient::cancelPendingRequests()
+{
+    if (m_pendingReplies.isEmpty()) return;
+
+    const auto replies = m_pendingReplies;
+    m_pendingReplies.clear();
+    for (auto *reply : replies) {
+        reply->abort();
+        reply->deleteLater();
+    }
 }

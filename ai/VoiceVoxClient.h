@@ -6,6 +6,7 @@
 #include <QByteArray>
 
 class QNetworkAccessManager;
+class QNetworkReply;
 
 /**
  * @brief VoiceVoxClient — 与本地 VoiceVox HTTP API 通信的客户端。
@@ -39,11 +40,15 @@ public:
     void fetchSpeakers();
 
     /// 合成语音（异步，结果通过 audioReady 信号返回）
-    void synthesize(const QString &text, int styleId);
+    void synthesize(const QString &text, int styleId, int requestId);
+
+    /// 取消所有进行中的请求
+    void cancelPendingRequests();
 
 signals:
     void speakersReady();
-    void audioReady(const QByteArray &wavData);
+    void audioReady(int requestId, const QByteArray &wavData);
+    void requestFailed(int requestId, const QString &reason);
     void networkError(const QString &message);
 
 private:
@@ -53,4 +58,5 @@ private:
     QNetworkAccessManager *m_net = nullptr;
     QString m_baseUrl = QStringLiteral("http://127.0.0.1:50021");
     QList<SpeakerInfo> m_cachedSpeakers;
+    QList<QNetworkReply*> m_pendingReplies;
 };

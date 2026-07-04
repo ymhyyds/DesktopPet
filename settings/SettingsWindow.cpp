@@ -71,7 +71,7 @@ void SettingsWindow::setupUi()
     m_ttsCheckBox->setChecked(true);
 
     m_backendCombo = new QComboBox(this);
-    m_backendCombo->addItem(QStringLiteral("PowerShell SAPI（系统语音）"), 0);
+    m_backendCombo->addItem(QStringLiteral("Edge TTS"), 0);
     m_backendCombo->addItem(QStringLiteral("VoiceVox（二次元语音）"), 1);
 
     auto *voiceRow = new QHBoxLayout();
@@ -327,11 +327,6 @@ void SettingsWindow::setAvailableVoices(const QStringList &voices, const QString
     if (voices.isEmpty()) {
         m_voiceComboBox->addItem(QStringLiteral("（无可用语音）"), QString());
         return;
-    }
-
-    const bool isSapi = (m_backendCombo->currentData().toInt() == 0);
-    if (isSapi) {
-        m_voiceComboBox->addItem(QStringLiteral("（系统默认）"), QString());
     }
 
     for (const QString &v : voices) {

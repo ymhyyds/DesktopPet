@@ -18,7 +18,7 @@ endif()
 # ---------------------------------------------------------------------------
 # 第三方依赖
 # ---------------------------------------------------------------------------
-# Qt6：Widgets(窗口/UI) Network(DeepSeek API) Sql(SQLite) Gui(QMovie等)
+# Qt6：Widgets(窗口/UI) Network(DeepSeek API) Sql(SQLite) Gui(QMovie等) Multimedia(TTS 音频播放)
 find_package(Qt6 REQUIRED COMPONENTS
     Core
     Gui
@@ -26,6 +26,7 @@ find_package(Qt6 REQUIRED COMPONENTS
     Network
     Sql
     OpenGLWidgets
+    Multimedia
 )
 
 # SQLite：Qt::Sql 默认通过 QSQLITE driver 内置支持，
@@ -151,6 +152,7 @@ target_link_libraries(DesktopPet PRIVATE
     Qt6::Network
     Qt6::Sql
     Qt6::OpenGLWidgets
+    Qt6::Multimedia
     dwmapi.lib
 )
 
@@ -349,4 +351,13 @@ if(EXISTS "${LIVE2D_SDK_ROOT}")
     )
 else()
     message(STATUS "[DesktopPet] 未找到 Live2D SDK（${LIVE2D_SDK_ROOT}），跳过 Live2D 集成，仅使用 gif 动画方案")
+endif()
+
+# ---------------------------------------------------------------------------
+# 可选：TTS 单元测试（不编入正式 DesktopPet.exe）
+# ---------------------------------------------------------------------------
+option(BUILD_TTS_TESTS "Build TTS unit tests with mock VoiceVox server" OFF)
+if(BUILD_TTS_TESTS)
+    enable_testing()
+    add_subdirectory(tests)
 endif()

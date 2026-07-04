@@ -1,88 +1,142 @@
 #include "TtsEngine.h"
 #include "VoiceVoxClient.h"
 
-#include <QProcess>
+#include <QMediaPlayer>
+#include <QAudioOutput>
 #include <QDebug>
 #include <QCoreApplication>
 #include <QRegularExpression>
 #include <QSettings>
 #include <QDir>
 #include <QFile>
-#include <QTemporaryDir>
-#include <QUuid>
-
-// ★ 必须设置 InputEncoding = UTF8，否则中文会被 GBK 编码乱码解析
-static const char *kPowerShellScript = R"(
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;
-[Console]::InputEncoding = [System.Text.Encoding]::UTF8;
-Add-Type -AssemblyName System.Speech;
-$s = [System.Speech.Synthesis.SpeechSynthesizer]::new();
-$s.Rate = %1;
-try { $s.SelectVoice("%2"); } catch {};
-while (($line = [Console]::ReadLine()) -ne $null) {
-    if ($line -eq '__STOP__') { break };
-    if ($line -eq '') { continue };
-    $s.Speak($line);
-    [Console]::WriteLine('OK');
-}
-)";
-
-// WAV 播放脚本：接收文件路径，播放完毕退出
-static const char *kWavPlayerScript = R"(
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;
-[Console]::InputEncoding = [System.Text.Encoding]::UTF8;
-Add-Type -AssemblyName System.Windows.Forms;
-(New-Object Media.SoundPlayer '%1').PlaySync();
-)";
+#include <QUrl>
 
 TtsEngine::TtsEngine(QObject *parent)
     : QObject(parent)
 {
+    // ── 创建统一播放器 ──
+    m_mediaPlayer = new QMediaPlayer(this);
+    m_audioOutput = new QAudioOutput(this);
+    m_mediaPlayer->setAudioOutput(m_audioOutput);
+
+    connect(m_mediaPlayer, &QMediaPlayer::mediaStatusChanged, this,
+        [this](QMediaPlayer::MediaStatus status) {
+            if (status == QMediaPlayer::EndOfMedia) {
+                // 正常播放结束 → 释放 source 后清理文件
+                m_mediaPlayer->stop();
+                m_mediaPlayer->setSource(QUrl());
+                cleanupTempFiles();
+            } else if (status == QMediaPlayer::InvalidMedia) {
+                qWarning() << "[TtsEngine] 无效媒体文件";
+                emit errorOccurred(static_cast<int>(m_backend),
+                    QStringLiteral("音频文件无效或无法加载"));
+                m_mediaPlayer->stop();
+                m_mediaPlayer->setSource(QUrl());
+                cleanupTempFiles();
+            }
+        });
+
+    connect(m_mediaPlayer, &QMediaPlayer::errorOccurred, this,
+        [this](QMediaPlayer::Error error, const QString &errorString) {
+            qWarning() << "[TtsEngine] 播放器错误:" << error << errorString;
+            emit errorOccurred(static_cast<int>(m_backend), errorString);
+            m_mediaPlayer->stop();
+            m_mediaPlayer->setSource(QUrl());
+            cleanupTempFiles();
+        });
+
+    // ── 读取设置并执行旧配置迁移 ──
     QSettings settings(QStringLiteral("DesktopPet"), QStringLiteral("TtsEngine"));
 
-    // 恢复后端
-    m_backend = static_cast<Backend>(settings.value(QStringLiteral("backend"), static_cast<int>(SAPI)).toInt());
+    const int schemaVersion = settings.value(QStringLiteral("backendSchemaVersion"), 1).toInt();
 
-    // 恢复 SAPI 语音
-    m_sapiVoiceName = settings.value(QStringLiteral("sapiVoice")).toString();
+    if (schemaVersion < 2) {
+        // === 旧格式迁移（version 1 → 2） ===
+        const int rawBackend = settings.value(QStringLiteral("backend"), 0).toInt();
 
-    // 恢复 VoiceVox 配置
-    m_vvUrl = settings.value(QStringLiteral("vvUrl"), QStringLiteral("http://127.0.0.1:50021")).toString();
+        int newBackend;
+        if (rawBackend == 0) {
+            // 旧 SAPI（值=0）→ EdgeTts
+            newBackend = static_cast<int>(EdgeTts);
+        } else if (rawBackend == 1) {
+            // 旧 VoiceVox（值=1）→ VoiceVox
+            newBackend = static_cast<int>(VoiceVox);
+        } else {
+            newBackend = static_cast<int>(EdgeTts);
+        }
+
+        // 原子写入迁移后配置
+        settings.setValue(QStringLiteral("backend"), newBackend);
+        settings.setValue(QStringLiteral("backendSchemaVersion"), 2);
+        settings.remove(QStringLiteral("sapiVoice"));
+
+        m_backend = static_cast<Backend>(newBackend);
+        qInfo() << "[TtsEngine] 旧配置已迁移: schemaVersion=1→2, backend=" << newBackend;
+    } else {
+        // 已迁移版本，直接读取
+        const int rawBackend = settings.value(QStringLiteral("backend"),
+            static_cast<int>(EdgeTts)).toInt();
+        if (rawBackend != static_cast<int>(EdgeTts)
+            && rawBackend != static_cast<int>(VoiceVox)) {
+            m_backend = EdgeTts;
+        } else {
+            m_backend = static_cast<Backend>(rawBackend);
+        }
+    }
+
+    // ── 恢复 VoiceVox 配置（不变） ──
+    m_vvUrl = settings.value(QStringLiteral("vvUrl"),
+        QStringLiteral("http://127.0.0.1:50021")).toString();
     m_vvStyleId = settings.value(QStringLiteral("vvStyleId"), 0).toInt();
     m_vvVoiceDisplayName = settings.value(QStringLiteral("vvVoiceName")).toString();
 
-    // 创建 VoiceVox 客户端
+    // ── 创建 VoiceVox 客户端 ──
     m_vvClient = new VoiceVoxClient(this);
     m_vvClient->setBaseUrl(m_vvUrl);
 
-    // VoiceVox 音频就绪 → 播放
-    connect(m_vvClient, &VoiceVoxClient::audioReady, this, [this](const QByteArray &wav) {
-        // 写入临时文件
-        const QString tmpDir = QDir::tempPath();
-        const QString wavPath = tmpDir + QStringLiteral("/deskpet_vv_") + QUuid::createUuid().toString(QUuid::Id128) + QStringLiteral(".wav");
-        QFile f(wavPath);
-        if (f.open(QIODevice::WriteOnly)) {
-            f.write(wav);
-            f.close();
-            playWavFile(wavPath);
-        } else {
-            qWarning() << "[TtsEngine] 无法写入临时 WAV 文件:" << wavPath;
-        }
-    });
+    // VoiceVox 音频就绪 → 统一处理
+    connect(m_vvClient, &VoiceVoxClient::audioReady,
+        this, &TtsEngine::handleAudioReady);
 
-    connect(m_vvClient, &VoiceVoxClient::networkError, this, [this](const QString &msg) {
-        qWarning() << "[TtsEngine] VoiceVox 错误:" << msg;
-    });
+    // VoiceVox 请求失败
+    connect(m_vvClient, &VoiceVoxClient::requestFailed,
+        this, [this](int requestId, const QString &msg) {
+            if (requestId != m_generation) return; // 已过期
+            qWarning() << "[TtsEngine] VoiceVox 请求失败 (req=" << requestId << "):" << msg;
+            emit errorOccurred(static_cast<int>(VoiceVox), msg);
+        });
+
+    // VoiceVox 网络错误（非请求级，如说话人列表拉取失败）
+    connect(m_vvClient, &VoiceVoxClient::networkError,
+        this, [this](const QString &msg) {
+            qWarning() << "[TtsEngine] VoiceVox 网络错误:" << msg;
+        });
 
     // VoiceVox 说话人就绪 → 通知 UI
-    connect(m_vvClient, &VoiceVoxClient::speakersReady, this, [this]() {
-        emit VoiceVoxSpeakersReady();
-    });
+    connect(m_vvClient, &VoiceVoxClient::speakersReady,
+        this, [this]() {
+            emit VoiceVoxSpeakersReady();
+        });
+
+    qInfo() << "[TtsEngine] 初始化完成，后端:" << (m_backend == VoiceVox ? "VoiceVox" : "EdgeTTS");
 }
 
 TtsEngine::~TtsEngine()
 {
-    killProcess();
+    stop();
+}
+
+// ============================================================================
+// 启用/禁用
+// ============================================================================
+
+void TtsEngine::setEnabled(bool enabled)
+{
+    if (m_enabled == enabled) return;
+    m_enabled = enabled;
+    if (!enabled) {
+        stop();
+    }
 }
 
 // ============================================================================
@@ -97,10 +151,14 @@ void TtsEngine::setBackend(Backend backend)
     QSettings settings(QStringLiteral("DesktopPet"), QStringLiteral("TtsEngine"));
     settings.setValue(QStringLiteral("backend"), static_cast<int>(backend));
 
-    // 停止当前后端
+    // 停止当前所有操作
     stop();
 
-    qInfo() << "[TtsEngine] 后端切换为:" << (backend == SAPI ? "SAPI" : "VoiceVox");
+    qInfo() << "[TtsEngine] 后端切换为:" << (backend == VoiceVox ? "VoiceVox" : "EdgeTTS");
+    emit statusChanged(static_cast<int>(backend),
+        backend == VoiceVox
+            ? QStringLiteral("VoiceVox")
+            : QStringLiteral("Edge TTS"));
 }
 
 // ============================================================================
@@ -109,16 +167,14 @@ void TtsEngine::setBackend(Backend backend)
 
 QStringList TtsEngine::availableVoices()
 {
-    if (m_backend == SAPI) {
-        if (m_cachedSapiVoices.isEmpty()) {
-            m_cachedSapiVoices = querySapiVoices();
-        }
-        return m_cachedSapiVoices;
+    if (m_backend == EdgeTts) {
+        // Phase 1: Edge CLI 尚未接入
+        return {};
     }
 
     // VoiceVox：从缓存返回显示名列表
     QStringList names;
-    const auto speakers = m_vvClient->speakers(); // 需要给 VoiceVoxClient 加 speakers() 方法
+    const auto speakers = m_vvClient->speakers();
     for (const auto &s : speakers) {
         names.append(s.name + QStringLiteral("（") + s.styleName + QStringLiteral("）"));
     }
@@ -127,18 +183,8 @@ QStringList TtsEngine::availableVoices()
 
 void TtsEngine::setVoice(const QString &voiceDisplayName)
 {
-    if (m_backend == SAPI) {
-        if (voiceDisplayName == m_sapiVoiceName) return;
-        m_sapiVoiceName = voiceDisplayName;
-
-        QSettings(QStringLiteral("DesktopPet"), QStringLiteral("TtsEngine"))
-            .setValue(QStringLiteral("sapiVoice"), m_sapiVoiceName);
-
-        // 重启 SAPI 进程
-        if (m_process && m_process->state() == QProcess::Running) {
-            killProcess();
-        }
-        qInfo() << "[TtsEngine] SAPI 语音设置为:" << m_sapiVoiceName;
+    if (m_backend == EdgeTts) {
+        // Phase 1: 暂时不处理 Edge 语音选择
         return;
     }
 
@@ -162,8 +208,8 @@ void TtsEngine::setVoice(const QString &voiceDisplayName)
 
 QString TtsEngine::voice() const
 {
-    if (m_backend == SAPI) {
-        return m_sapiVoiceName;
+    if (m_backend == EdgeTts) {
+        return {};
     }
     return m_vvVoiceDisplayName;
 }
@@ -176,7 +222,7 @@ void TtsEngine::refreshVoices()
 }
 
 // ============================================================================
-// 朗读
+// 朗读（统一入口，latest-wins）
 // ============================================================================
 
 void TtsEngine::speak(const QString &text)
@@ -188,167 +234,154 @@ void TtsEngine::speak(const QString &text)
     sanitized.remove(QRegularExpression(QStringLiteral("<[^>]*>")));
     if (sanitized.isEmpty()) return;
 
-    if (m_backend == SAPI) {
-        ensureProcess();
-        if (!m_process || m_process->state() != QProcess::Running) {
-            qWarning() << "[TtsEngine] SAPI 进程不可用";
-            return;
-        }
-        m_process->write((sanitized + QStringLiteral("\r\n")).toUtf8());
-        // ★ 不阻塞等写入完成 —— 管道写几乎瞬间完成，waitForBytesWritten 会阻塞主线程 1 秒
-        //   阻塞期间 Qt 事件循环无法处理窗口事件/动画/重绘 → 卡顿
+    // ↑ generation → 取消旧请求，标记最新
+    m_generation++;
+    const int gen = m_generation;
+
+    // 停止当前播放和合成
+    stopPlayer();
+    m_vvClient->cancelPendingRequests();
+    cleanupTempFiles();
+
+    if (m_backend == EdgeTts) {
+        // Phase 1: Edge CLI 尚未接入
+        qInfo() << "[TtsEngine] Edge TTS 将在第二阶段接入";
+        emit statusChanged(static_cast<int>(EdgeTts),
+            QStringLiteral("Edge TTS 尚未接入"));
         return;
     }
 
-    // VoiceVox：异步合成
-    m_vvClient->synthesize(sanitized, m_vvStyleId);
+    if (m_backend == VoiceVox) {
+        m_vvClient->synthesize(sanitized, m_vvStyleId, gen);
+        emit statusChanged(static_cast<int>(VoiceVox),
+            QStringLiteral("VoiceVox 合成中..."));
+    }
 }
+
+// ============================================================================
+// 停止（停止一切：播放 + 合成 + 清理）
+// ============================================================================
 
 void TtsEngine::stop()
 {
-    if (m_backend == SAPI) {
-        if (m_process && m_process->state() == QProcess::Running) {
-            m_process->write("__STOP__\r\n");
-            killProcess();
-        }
-    }
-    // VoiceVox 的音频播放是独立进程，stop 不打断已开始的播放
+    m_generation++;
+    stopPlayer();
+    m_vvClient->cancelPendingRequests();
+    cleanupTempFiles();
 }
 
 // ============================================================================
-// SAPI 进程管理
+// 播放器控制
 // ============================================================================
 
-void TtsEngine::ensureProcess()
+void TtsEngine::stopPlayer()
 {
-    if (m_process && m_process->state() == QProcess::Running) return;
-    killProcess();
+    m_mediaPlayer->stop();
+    m_mediaPlayer->setSource(QUrl());
+}
 
-    m_process = new QProcess(this);
-    m_process->setProcessChannelMode(QProcess::ForwardedErrorChannel);
+// ============================================================================
+// 临时文件管理
+// ============================================================================
 
-    QString safeVoice = m_sapiVoiceName;
-    safeVoice.replace(QStringLiteral("\""), QStringLiteral("\"\""));
+void TtsEngine::cleanupTempFiles()
+{
+    if (!m_currentTempDir.isEmpty()) {
+        QDir dir(m_currentTempDir);
+        if (dir.exists()) {
+            // 删除目录下所有文件
+            const auto files = dir.entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
+            for (const QFileInfo &fi : files) {
+                QFile::remove(fi.absoluteFilePath());
+            }
+            dir.rmdir(m_currentTempDir);
+        }
+        m_currentTempDir.clear();
+        m_currentTempRequestId = -1;
+    }
+}
 
-    const QString script = QString::fromUtf8(kPowerShellScript)
-                               .arg(m_rate)
-                               .arg(safeVoice);
+// ============================================================================
+// VoiceVox 音频就绪处理
+// ============================================================================
 
-    m_process->start(QStringLiteral("powershell"),
-                     {QStringLiteral("-NoProfile"), QStringLiteral("-NoLogo"),
-                      QStringLiteral("-Command"), script});
-
-    if (!m_process->waitForStarted(3000)) {
-        qWarning() << "[TtsEngine] 无法启动 PowerShell 进程:" << m_process->errorString();
+void TtsEngine::handleAudioReady(int requestId, const QByteArray &wavData)
+{
+    // 校验 generation：过期请求不播放
+    if (requestId != m_generation) {
+        qInfo() << "[TtsEngine] 丢弃过期 VoiceVox 音频 (req="
+                << requestId << "gen=" << m_generation << ")";
         return;
     }
-    qInfo() << "[TtsEngine] SAPI 进程已启动，语音:" << (m_sapiVoiceName.isEmpty() ? "默认" : m_sapiVoiceName);
-}
 
-void TtsEngine::killProcess()
-{
-    if (m_process) {
-        if (m_process->state() == QProcess::Running) {
-            m_process->write("__STOP__\r\n");
-            m_process->kill();
-            m_process->waitForFinished(1000);
-        }
-        m_process->deleteLater();
-        m_process = nullptr;
+    if (m_backend != VoiceVox) {
+        qInfo() << "[TtsEngine] 后端已切换，丢弃 VoiceVox 音频";
+        return;
     }
-}
 
-// ============================================================================
-// VoiceVox WAV 播放
-// ============================================================================
-
-void TtsEngine::playWavFile(const QString &wavPath)
-{
-    const QString script = QString::fromUtf8(kWavPlayerScript).arg(wavPath);
-
-    auto *player = new QProcess(this);
-    connect(player, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this, player, wavPath](int, QProcess::ExitStatus) {
-                // 播放完毕，清理
-                QFile::remove(wavPath);
-                player->deleteLater();
-            });
-
-    player->start(QStringLiteral("powershell"),
-                  {QStringLiteral("-NoProfile"), QStringLiteral("-NoLogo"),
-                   QStringLiteral("-WindowStyle"), QStringLiteral("Hidden"),
-                   QStringLiteral("-Command"), script});
-
-    if (!player->waitForStarted(3000)) {
-        qWarning() << "[TtsEngine] 无法启动 WAV 播放进程:" << player->errorString();
-        QFile::remove(wavPath);
-        player->deleteLater();
+    if (!m_enabled) {
+        qInfo() << "[TtsEngine] TTS 已关闭，丢弃音频";
+        return;
     }
-}
 
-// ============================================================================
-// 语速
-// ============================================================================
+    // 创建唯一临时目录
+    const QString tmpDir = QDir::tempPath()
+        + QStringLiteral("/DesktopPetTts/")
+        + QString::number(QCoreApplication::applicationPid())
+        + QStringLiteral("/")
+        + QString::number(requestId);
 
-void TtsEngine::setRate(int rate)
-{
-    m_rate = qBound(-10, rate, 10);
-    if (m_process && m_process->state() == QProcess::Running) {
-        killProcess();
+    QDir().mkpath(tmpDir);
+
+    const QString wavPath = tmpDir + QStringLiteral("/output.wav");
+    QFile f(wavPath);
+    if (!f.open(QIODevice::WriteOnly)) {
+        qWarning() << "[TtsEngine] 无法写入临时 WAV:" << wavPath;
+        emit errorOccurred(static_cast<int>(VoiceVox),
+            QStringLiteral("无法写入临时 WAV 文件"));
+        return;
     }
+    f.write(wavData);
+    f.close();
+
+    // 记录当前临时文件
+    m_currentTempDir = tmpDir;
+    m_currentTempRequestId = requestId;
+
+    // 通过统一播放器播放
+    m_mediaPlayer->setSource(QUrl::fromLocalFile(wavPath));
+    m_mediaPlayer->play();
+
+    emit statusChanged(static_cast<int>(VoiceVox),
+        QStringLiteral("VoiceVox 播放中"));
 }
 
 // ============================================================================
-// VoiceVox URL
+// VoiceVox URL（带规范化）
 // ============================================================================
 
 void TtsEngine::setVoiceVoxUrl(const QString &url)
 {
-    m_vvUrl = url;
-    while (m_vvUrl.endsWith('/')) m_vvUrl.chop(1);
+    QString clean = url.trimmed();
+    while (clean.endsWith('/')) clean.chop(1);
+
+    // 验证 scheme
+    if (!clean.startsWith(QStringLiteral("http://"))
+        && !clean.startsWith(QStringLiteral("https://"))) {
+        qWarning() << "[TtsEngine] VoiceVox URL scheme 无效，使用默认 URL";
+        clean = QStringLiteral("http://127.0.0.1:50021");
+    }
+
+    m_vvUrl = clean;
     m_vvClient->setBaseUrl(m_vvUrl);
 
     QSettings(QStringLiteral("DesktopPet"), QStringLiteral("TtsEngine"))
         .setValue(QStringLiteral("vvUrl"), m_vvUrl);
+
+    qInfo() << "[TtsEngine] VoiceVox URL 已设置:" << m_vvUrl;
 }
 
 QString TtsEngine::voiceVoxUrl() const
 {
     return m_vvUrl;
-}
-
-// ============================================================================
-// 查询 SAPI 语音
-// ============================================================================
-
-QStringList TtsEngine::querySapiVoices()
-{
-    QProcess proc;
-    proc.start(QStringLiteral("powershell"),
-               {QStringLiteral("-NoProfile"), QStringLiteral("-NoLogo"),
-                QStringLiteral("-Command"), QStringLiteral("-")});
-    if (!proc.waitForStarted(5000)) {
-        qWarning() << "[TtsEngine] 无法启动 PowerShell 查询语音";
-        return {};
-    }
-
-    const QByteArray script =
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;\r\n"
-        "Add-Type -AssemblyName System.Speech;\r\n"
-        "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;\r\n"
-        "$s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo.Name };\r\n"
-        "exit\r\n";
-
-    proc.write(script);
-    proc.closeWriteChannel();
-    proc.waitForFinished(5000);
-
-    const QString output = QString::fromUtf8(proc.readAllStandardOutput());
-    QStringList voices;
-    for (const QString &line : output.split(QRegularExpression(QStringLiteral("[\r\n]+")),
-                                            Qt::SkipEmptyParts)) {
-        const QString t = line.trimmed();
-        if (!t.isEmpty()) voices.append(t);
-    }
-    return voices;
 }
