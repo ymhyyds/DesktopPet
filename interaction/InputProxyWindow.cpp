@@ -303,6 +303,14 @@ void InputProxyWindow::mouseMoveEvent(QMouseEvent *event)
 void InputProxyWindow::mouseReleaseEvent(QMouseEvent *event)
 {
     if (event->button() == Qt::LeftButton) {
+        // ── 双击后第二次 release：跳过，只清除标志 ──
+        if (m_suppressNextReleaseSingle) {
+            m_suppressNextReleaseSingle = false;
+            m_pressInHeadArea = false;
+            m_pressInBodyArea = false;
+            return;
+        }
+
         if (m_dragging) {
             // 拖拽结束
             cleanupDrag();
@@ -310,13 +318,12 @@ void InputProxyWindow::mouseReleaseEvent(QMouseEvent *event)
         } else if (m_pressInHeadArea) {
             // 头部点击 → 摸摸头
             m_pressInHeadArea = false;
-            qInfo() << "[InputProxy] headClicked → triggerPet";
             if (m_petWindow) m_petWindow->triggerPet();
         } else if (m_pressInBodyArea) {
             // 身体点击 → 随机动作
             m_pressInBodyArea = false;
-            qInfo() << "[InputProxy] bodyClicked → playTapMotion";
             if (m_live2DView) m_live2DView->playTapMotion();
+        } else {
         }
     }
 
@@ -329,13 +336,16 @@ void InputProxyWindow::mouseDoubleClickEvent(QMouseEvent *event)
 {
     // 使用本次双击的坐标重新做命中检测，不沿用第一次 press 的旧状态
     if (!isInteractivePoint(event->position())) {
-        // 未命中 → 不调 InteractionManager，不播放动作，不触发任何桌宠交互
-        // （eventFilter 已 return true 阻止了事件派发，此 checks 为兜底）
+        // 未命中（透明区域双击）→ 不触发任何桌宠交互，不设置抑制
         cleanupDrag();
         return;
     }
 
-    // 命中交互点 → 允许 InteractionManager 正常处理双击语义
+    // ── 命中实体区域 ──
+    // 设置抑制标志：双击第二次 release 不应再触发一次普通点击交互
+    m_suppressNextReleaseSingle = true;
+
+    // 允许 InteractionManager 处理双击语义（取消 pending single click + 打开聊天）
     QWidget::mouseDoubleClickEvent(event);
 }
 
@@ -344,6 +354,7 @@ void InputProxyWindow::cleanupDrag()
     m_dragging = false;
     m_pressInHeadArea = false;
     m_pressInBodyArea = false;
+    m_suppressNextReleaseSingle = false;
     if (QWidget::mouseGrabber() == this) {
         releaseMouse();
     }

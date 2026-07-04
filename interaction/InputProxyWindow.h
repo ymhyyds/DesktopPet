@@ -73,6 +73,9 @@ private:
     QRegion m_preciseRegion;
     bool    m_preciseRegionValid = false;
 
+    // ── 双击抑制（防止第二次 release 再触发一次普通点击） ──
+    bool    m_suppressNextReleaseSingle = false;
+
     // ── 几何裁剪偏移（PetWindow origin → InputProxyWindow origin） ──
     int m_geoOffsetX = 0;
     int m_geoOffsetY = 0;
