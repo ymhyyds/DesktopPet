@@ -243,6 +243,15 @@ bool App::initialize()
     // InteractionManager 安装在 InputProxyWindow 上（不再直接装在 PetWindow）
     m_interactionManager = std::make_unique<InteractionManager>(m_inputProxyWindow.get());
 
+    // ── 恢复挂机超时设置 ──
+    {
+        QSettings ss(QStringLiteral("DesktopPet"), QStringLiteral("App"));
+        const int savedMinutes = ss.value(QStringLiteral("idleTimeoutMinutes"), 10).toInt();
+        const int clampedMinutes = qBound(1, savedMinutes, 180);
+        m_interactionManager->setIdleTimeoutMs(clampedMinutes * 60000);
+        qInfo() << "[App] 恢复挂机超时设置：" << clampedMinutes << "分钟";
+    }
+
     // 初始 mask（暂不 show，等 PetWindow show 之后再 show）
 
     // 模型加载 → mask 更新
@@ -409,15 +418,30 @@ void App::setupConnections()
 
     connect(m_interactionManager.get(), &InteractionManager::idleTimeout,
             this, [this]() {
+                // AI 请求进行中 → 抑制挂机主动请求，防止覆盖流式 buffer
+                if (m_aiBusy) return;
+
                 const QString prompt = m_promptManager->buildProactivePrompt();
-                m_aiClient->sendMessage(prompt, m_promptManager->contextHistory());
+                // 创建历史副本，追加 prompt 后发送，不污染 PromptManager 长期历史
+                {
+                    auto history = m_promptManager->contextHistory();
+                    history.append(ChatMessage(QStringLiteral("user"), prompt));
+                    m_aiBusy = true;
+                    m_aiClient->sendMessage(prompt, history);
+                }
             });
 
     // --- 聊天窗口 → AI 客户端 ---
     connect(m_chatWindow.get(), &ChatWindow::userMessageSent,
             this, [this](const QString &text) {
+                // AI 忙碌中 → 阻止发送，提示用户稍后再试
+                if (m_aiBusy) {
+                    m_chatWindow->appendSystemMessage(tr("AI 正在回复，请稍后再试。"));
+                    return;
+                }
                 m_promptManager->appendUserMessage(text);
                 m_memoryDb->saveMessage(m_currentCharacter, QStringLiteral("user"), text);
+                m_aiBusy = true;
                 m_aiClient->sendMessage(text, m_promptManager->contextHistory());
             });
 
@@ -440,6 +464,7 @@ void App::setupConnections()
     // --- AI 客户端流式结束 → 记忆落库 + 情绪分析 + TTS ---
     connect(m_aiClient.get(), &DeepSeekClient::replyReceived,
             this, [this](const QString &reply) {
+                m_aiBusy = false;
                 m_chatWindow->finishAssistantMessage();
 
                 // 记忆落库
@@ -464,6 +489,7 @@ void App::setupConnections()
 
     connect(m_aiClient.get(), &DeepSeekClient::errorOccurred,
             this, [this](const QString &error) {
+                m_aiBusy = false;
                 qWarning() << "[App] AI 请求出错：" << error;
                 m_chatWindow->appendSystemMessage(tr("AI 暂时没有响应，请稍后再试～"));
             });
@@ -552,6 +578,10 @@ void App::setupConnections()
     connect(m_settingsWindow.get(), &SettingsWindow::idleTimeoutMinutesChanged,
             this, [this](int minutes) {
                 m_interactionManager->setIdleTimeoutMs(minutes * 60000);
+                // ★ 持久化，重启后可恢复
+                QSettings ss(QStringLiteral("DesktopPet"), QStringLiteral("App"));
+                ss.setValue(QStringLiteral("idleTimeoutMinutes"), minutes);
+                qInfo() << "[App] 挂机超时已保存：" << minutes << "分钟";
             });
 
     connect(m_settingsWindow.get(), &SettingsWindow::modelScaleChanged,

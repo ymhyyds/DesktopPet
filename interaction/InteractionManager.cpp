@@ -34,9 +34,8 @@ InteractionManager::InteractionManager(QWidget *targetWindow, QObject *parent)
 void InteractionManager::setIdleTimeoutMs(int ms)
 {
     m_idleTimer->setInterval(ms);
-    if (!m_idleTimer->isActive()) {
-        m_idleTimer->start();
-    }
+    // 始终重置计时器，使新间隔立即生效
+    m_idleTimer->start();
 }
 
 int InteractionManager::idleTimeoutMs() const

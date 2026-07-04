@@ -159,4 +159,7 @@ private:
     // --- 自动扫描新模型 ---
     QFileSystemWatcher *m_fsWatcher = nullptr;
     QString m_charactersPath;   // characters/ 的绝对路径（基于 exe 目录）
+
+    // --- AI 请求繁忙标志（防止挂机主动请求覆盖流式 buffer） ---
+    bool m_aiBusy = false;
 };

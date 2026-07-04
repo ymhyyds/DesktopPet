@@ -2488,3 +2488,47 @@ else                    → Hidden（双窗口同步隐藏）
 | 浮动文字 | 不修改 |
 
 **未提交。禁止 reset / revert / checkout / stash / apply patch。**
+
+---
+
+## 会话30 — TTS 双后端 + 挂机主动说话超时 审计（2026-07-04 ✅）
+
+### 稳定基线
+
+| 项目 | 值 |
+|------|-----|
+| 标签 | `v0.4.0-stable-fullscreen-policy` |
+| 分支 | `master` (110e71a) |
+| 工作区 | 干净 |
+| 构建 | Release — **0 errors, 0 warnings** |
+
+### 审计范围
+
+1. TTS 双后端完整性
+2. 设置中"挂机主动说话超时"完整性
+
+### 已确认的缺陷
+
+| 严重度 | 缺陷 | 文件 |
+|--------|------|------|
+| **严重** | 挂机主动说话 prompt 被 `Q_UNUSED` 忽略，从未进入 AI 请求 | `ai/DeepSeekClient.cpp:62` / `core/App.cpp:411-413` |
+| 中 | idleTimeoutMinutes 设置不持久化，重启后 fallback 10 分钟 | `core/App.cpp:552-554` |
+| 低 | 修改超时值后不重置正在运行的 timer，需等旧间隔到期才生效 | `interaction/InteractionManager.cpp:34-39` |
+| 低 | 右键菜单事件不重置挂机计时 | `interaction/InteractionManager.cpp eventFilter` |
+| 中 | VoiceVox 多重播放无并发控制，连续 speak() 产生重叠播放 | `ai/TtsEngine.cpp:269-286` |
+| 低 | 切换后端时不断开 VoiceVox pending 请求 | `ai/TtsEngine.cpp:92-103` |
+
+### 下一阶段修复任务（按优先级）
+
+1. **修复** 挂机主动说话 prompt 未进入 AI 请求 — `App.cpp` idleTimeout handler 中调用 `appendUserMessage(prompt)` 或 `sendMessage` 实际使用 `latestUserText`
+2. **修复** 持久化 `idleTimeoutMinutes` 到 QSettings
+3. **修复** `setIdleTimeoutMs` 中修改间隔后 `m_idleTimer->start()` 立即重置（而非仅在不活动时 start）
+4. **修复** AI 忙碌时抑制挂机主动请求，避免并发破坏流式回复 — DeepSeekClient 需加 `m_busy` 标志
+5. **留到下一阶段** VoiceVoz 播放队列 + 后端切换取消
+
+### 审计报告
+
+详见桌面文档：`DesktopPet_TTS_IdleTimeout_审计报告.docx`
+
+---
+
