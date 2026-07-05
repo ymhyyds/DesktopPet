@@ -109,6 +109,7 @@ private slots:
 private:
     void setupUi();
     void updateBackendVisibility();
+    void refreshCurrentVoiceList();
 
 private:
     QLineEdit *m_apiKeyEdit = nullptr;

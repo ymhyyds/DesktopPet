@@ -309,11 +309,10 @@ void SettingsWindow::updateBackendVisibility()
     m_edgeTestStatusLabel->setVisible(isEdge);
 }
 
-void SettingsWindow::onBackendChanged(int)
+void SettingsWindow::refreshCurrentVoiceList()
 {
-    const bool isEdge = (m_backendCombo->currentData().toInt() == 0);
-    updateBackendVisibility();
     m_voiceComboBox->clear();
+    const bool isEdge = (m_backendCombo->currentData().toInt() == 0);
     m_voiceComboBox->setEditable(isEdge);
 
     if (isEdge) {
@@ -335,6 +334,12 @@ void SettingsWindow::onBackendChanged(int)
             QStringLiteral("zh-CN-XiaozhenNeural"),
         };
         m_voiceComboBox->addItems(commonVoices);
+
+        // 确保自定义语音（可能不在预置列表中）不丢失
+        if (!commonVoices.contains(m_edgeVoice) && !m_edgeVoice.isEmpty()) {
+            m_voiceComboBox->addItem(m_edgeVoice);
+        }
+
         m_voiceComboBox->setCurrentText(m_edgeVoice);
         // 启用测试按钮，恢复就绪状态
         m_edgeTestBtn->setEnabled(true);
@@ -343,6 +348,12 @@ void SettingsWindow::onBackendChanged(int)
         // VoiceVox: selection combo, show placeholder
         m_voiceComboBox->addItem(QStringLiteral("（切换后端后请保存以加载语音）"), QString());
     }
+}
+
+void SettingsWindow::onBackendChanged(int)
+{
+    updateBackendVisibility();
+    refreshCurrentVoiceList();
 }
 
 void SettingsWindow::onSaveClicked()
@@ -418,13 +429,19 @@ void SettingsWindow::setKeepOnTop(bool keepOnTop)
 
 void SettingsWindow::setTtsBackend(int backend)
 {
-    for (int i = 0; i < m_backendCombo->count(); ++i) {
-        if (m_backendCombo->itemData(i).toInt() == backend) {
-            m_backendCombo->setCurrentIndex(i);
-            break;
+    {
+        QSignalBlocker blocker(m_backendCombo);
+        for (int i = 0; i < m_backendCombo->count(); ++i) {
+            if (m_backendCombo->itemData(i).toInt() == backend) {
+                m_backendCombo->setCurrentIndex(i);
+                break;
+            }
         }
     }
+    // QSignalBlocker 出作用域后撤销阻塞，但下面两行手动完成初始化，
+    // 不需要依赖信号触发 onBackendChanged。
     updateBackendVisibility();
+    refreshCurrentVoiceList();
 }
 
 void SettingsWindow::setAvailableVoices(const QStringList &voices, const QString &currentVoice)
