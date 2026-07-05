@@ -1,6 +1,6 @@
 # DesktopPet 项目上下文
 
-> 最后更新: 2026-07-05 (阶段2 全部完成 — 提交 24dfae8，标签 checkpoint-edge-tts-phase2)
+> 最后更新: 2026-07-05 (阶段2 全部完成 + CLI 实机验证通过 — 提交 24dfae8，标签 checkpoint-edge-tts-phase2)
 > 当前分支: feature/edge-tts-voicevox-only
 > 阶段1 完成度: 代码 100%, 单元测试 100% (19/19)
 > 阶段2 完成度: 代码 100%, 单元测试 100% (35/35), CMake/mock/测试修复全部完成
@@ -60,22 +60,40 @@
 - [x] 提交：24dfae8 `feat: add Edge TTS CLI backend and tests`
 - [x] 标签：`checkpoint-edge-tts-phase2`
 - [x] 总计 35 项测试（VoiceVoxClient 11 + TtsEngine 8 + EdgeTtsEngine 16）全部通过
-- [x] 真实 edge-tts CLI 尚未安装和实机验证（留阶段 3）
+- [x] 真实 edge-tts CLI 已安装并通过实机验证（tools/edge_tts/.venv，阶段 2 内完成）
 - [ ] SettingsWindow Edge 设置面板（音色、语速、音量、音高、路径、测试）— 留阶段 3
 
 ### ★ 阶段2 实现详情（当前状态）
 
 **当前分支：`feature/edge-tts-voicevox-only`（阶段1 基线：`afb6a303`）**
 
-#### Edge CLI 环境检查
+#### Edge CLI 环境检查（实机验证通过）
 - Python 3.14.6 已安装（`py` / `python`）
-- `edge-tts` 未全局安装
-- `pip` 可用
-- 安装脚本 `tools/edge_tts/install_edge_tts.bat` 已创建（项目局部 .venv）
+- `edge-tts` 项目局部安装于 `tools/edge_tts/.venv`（`edge-tts 7.2.8`）
+- 安装方式：`python -m venv .venv` + `pip install edge-tts`
+- `.venv/` 已加入 `.gitignore`，未被 Git 跟踪
 
-#### Edge TTS CLI 参数支持
-未安装 edge-tts，无法实际验证 CLI 参数。代码按标准 edge-tts 文档实现：
-- `--file`, `--voice`, `--rate`, `--volume`, `--pitch`, `--write-media`
+#### Edge TTS CLI 参数支持（实机验证通过）
+通过 `edge-tts --help` 确认全部参数可用，并用 `zh-CN-XiaoyiNeural` 成功生成有效 MP3：
+- `--file` / `-f` — 从 UTF-8 文本文件读取输入
+- `--voice` / `-v` — 选择声音
+- `--rate` — 语速（如 `+5%`）
+- `--volume` — 音量（如 `+0%`）
+- `--pitch` — 音高（如 `+15Hz`）
+- `--write-media` — 输出 MP3 文件
+- `--list-voices` / `-l` — 列出可用声音
+- `--text` / `-t` — 直接输入文本
+
+**实测验证**（2026-07-05）：
+| 项目 | 值 |
+|------|-----|
+| 测试声音 | `zh-CN-XiaoyiNeural`（女声，卡通/小说风格） |
+| 测试参数 | rate `+5%`, volume `+0%`, pitch `+15Hz` |
+| 生成文件 | MP3 24,192 字节（有效音频） |
+| 临时文件 | `test_input.txt` + `test_output.mp3` 已清理 |
+| Git | 工作区干净，无新增文件 |
+
+**注意**：首次运行需用户在项目根执行 `tools/edge_tts/install_edge_tts.bat`（自动创建 `.venv` 并安装）。阶段 3 尚未开始。
 
 #### 修改文件
 
@@ -208,7 +226,7 @@ EdgeTtsEngineTest:  16/16 PASS  (10.7s / 10.7s)
 - 不使用硬编码路径，mock 文件通过 CMake POST_BUILD 自动复制
 
 **已知限制（留阶段 3）：**
-1. 真实 `edge-tts` CLI 尚未安装，CI/用户端首次运行需要先执行 `tools/edge_tts/install_edge_tts.bat`
+1. 真实 `edge-tts` CLI 已安装在 `tools/edge_tts/.venv`（edge-tts 7.2.8），CI/用户端首次运行仍需执行 `tools/edge_tts/install_edge_tts.bat`
 2. Edge 语音列表查询（`availableVoices()`）返回空列表，待阶段 3 补实现
 3. SettingsWindow Edge 设置面板未实现
 4. **QProcess 所有权潜在风险**（当前无运行时崩溃，建议阶段 3 前修复）：
