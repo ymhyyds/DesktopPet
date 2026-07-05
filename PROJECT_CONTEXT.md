@@ -1,8 +1,11 @@
 # DesktopPet 项目上下文
 
-> 最后更新: 2026-07-05 (阶段1 — 全部完成，所有 19 项测试通过)
+> 最后更新: 2026-07-05 (阶段2 全部完成 — 提交 24dfae8，标签 checkpoint-edge-tts-phase2)
 > 当前分支: feature/edge-tts-voicevox-only
-> 阶段1 完成度: 代码修改 100%, 迁移测试 100%, Release 构建 100%, 单元测试 100% (19/19)
+> 阶段1 完成度: 代码 100%, 单元测试 100% (19/19)
+> 阶段2 完成度: 代码 100%, 单元测试 100% (35/35), CMake/mock/测试修复全部完成
+> 阶段2 提交: 24dfae8 feat: add Edge TTS CLI backend and tests
+> 阶段2 标签: checkpoint-edge-tts-phase2
 > 项目路径: `C:\Users\余敏涵\Desktop\DesktopPet`
 
 ---
@@ -11,9 +14,9 @@
 
 一个基于 Qt6 + Live2D Cubism SDK 的桌面宠物程序，**纯 Live2D 模式**。
 
-### ★ 阶段1 — TTS 重构（feature/edge-tts-voicevox-only）
+### ★ 阶段1 — TTS 重构（已完成，基线提交 afb6a303）
 
-**状态：代码完成，Release 构建通过，迁移验证通过，运行时测试待补做。**
+**状态：代码完成，Release 构建通过，迁移验证通过，运行时测试 19/19 通过。**
 
 #### 已完成
 
@@ -46,13 +49,174 @@
 
 #### 待完成（阶段2）
 
-- [ ] Edge TTS CLI 接入（QProcess + edge-tts.exe）
-- [ ] 插件发现 5 级优先级
-- [ ] Edge 合成 30 秒超时
-- [ ] SettingsWindow Edge 设置面板（音色、语速、音量、音高、路径、测试）
+- [x] Edge TTS CLI 接入（QProcess + edge-tts.exe）
+- [x] 插件发现 5 级优先级
+- [x] Edge 合成 30 秒超时
+- [x] Edge 设置数据层（QSettings 5 个 key，持久化）
+- [x] 安装脚本（tools/edge_tts/install_edge_tts.bat）
+- [x] mock_edge_tts.py/.bat 测试模拟 CLI
+- [x] EdgeTtsEngineTest 14 项测试全部通过（16/16，含 fixture），运行无崩溃无残留
+- [x] 修复三项：mock 可播 WAV、CMake 部署路径、测试时序/路径问题
+- [x] 提交：24dfae8 `feat: add Edge TTS CLI backend and tests`
+- [x] 标签：`checkpoint-edge-tts-phase2`
+- [x] 总计 35 项测试（VoiceVoxClient 11 + TtsEngine 8 + EdgeTtsEngine 16）全部通过
+- [x] 真实 edge-tts CLI 尚未安装和实机验证（留阶段 3）
+- [ ] SettingsWindow Edge 设置面板（音色、语速、音量、音高、路径、测试）— 留阶段 3
 
-#### 已移除
+### ★ 阶段2 实现详情（当前状态）
 
+**当前分支：`feature/edge-tts-voicevox-only`（阶段1 基线：`afb6a303`）**
+
+#### Edge CLI 环境检查
+- Python 3.14.6 已安装（`py` / `python`）
+- `edge-tts` 未全局安装
+- `pip` 可用
+- 安装脚本 `tools/edge_tts/install_edge_tts.bat` 已创建（项目局部 .venv）
+
+#### Edge TTS CLI 参数支持
+未安装 edge-tts，无法实际验证 CLI 参数。代码按标准 edge-tts 文档实现：
+- `--file`, `--voice`, `--rate`, `--volume`, `--pitch`, `--write-media`
+
+#### 修改文件
+
+| 文件 | 改动 |
+|------|------|
+| `.gitignore` | 添加 `tools/edge_tts/.venv/` |
+| `ai/TtsEngine.h` | 新增 Edge TTS 成员：QProcess、QTimer、Edge 设置 getter/setter、`resolveEdgeExecutable()`、`formatEdgePercent/HZ`、生命周期方法 |
+| `ai/TtsEngine.cpp` | 实现 Edge TTS：startEdgeTts、onEdgeStarted/Finished/Error/Timeout、killEdgeProcess、5 级插件发现、QSettings 读写、CLI 参数格式化、latest-wins（在 speak/stop 中 kill 旧进程和 cancel VV） |
+| `tests/CMakeLists.txt` | 添加 mock_edge_tts.py/.bat 的 configure_file 复制 |
+| `tests/test_main.cpp` | 添加 EdgeTtsEngineTest 类声明 + 套件运行器 + include |
+| `tests/EdgeTtsEngineTest.cpp` | **新增** 14 项测试 |
+| `tests/mock_edge_tts.py` | **新增** Python mock CLI 脚本 |
+| `tests/mock_edge_tts.bat` | **新增** batch wrapper |
+| `tools/edge_tts/install_edge_tts.bat` | **新增** 虚拟环境安装脚本 |
+
+#### 插件发现顺序（`resolveEdgeExecutable()`）
+
+1. QSettings `edgeExecutablePath` → 存在且为文件则直接返回
+2. `build/Release/../../tools/edge_tts/.venv/Scripts/edge-tts.exe`
+3. `build/Release/../plugins/edge-tts/edge-tts.exe`
+4. `QStandardPaths::findExecutable("edge-tts.exe")`
+5. `QStandardPaths::findExecutable("edge-tts")`
+
+#### QSettings Keys（DesktopPet/TtsEngine）
+
+| Key | 类型 | 默认值 |
+|-----|------|--------|
+| `edgeExecutablePath` | QString | 空（用户手动配置） |
+| `edgeVoice` | QString | `zh-CN-XiaoyiNeural` |
+| `edgeRatePercent` | int | 5 |
+| `edgeVolumePercent` | int | 0 |
+| `edgePitchHz` | int | 15 |
+
+所有 setter 立即调 `QSettings().setValue()` + `sync()`（由 Qt 内部管理）。
+CLI 格式化：`5→"+5%"`, `-5→"-5%"`, `15→"+15Hz"`, `0→"+0%"`。
+
+#### QProcess 生命周期
+
+- 仅允许一个活动 Edge QProcess，存储在 `m_edgeProcess`（每次 startEdgeTts 创建新的，killEdgeProcess 时 disconnect + kill + waitForFinished + deleteLater）
+- 每次 `startEdgeTts` 记录 `m_edgeProcessGeneration = gen`
+- 所有回调（`onEdgeFinished / onEdgeErrorOccurred / onEdgeTimeout`）检查 `m_edgeProcessGeneration != m_generation` 过滤过期回调
+- `killEdgeProcess` 先 `disconnect()` 再 kill，防止旧进程信号触发
+- 输出文件检查：exitCode==0、文件存在、文件 size>0
+
+#### Timeout 实现
+
+- 单次 `QTimer`（`m_edgeTimeoutTimer`），每次请求 `m_edgeTimeoutTimer->start(30000)`
+- 独立记录 `m_edgeTimeoutGeneration`
+- `onEdgeTimeout()` 检查 `m_edgeTimeoutGeneration == m_generation`
+- 过期/stop 时 `m_edgeTimeoutTimer->stop()`
+- 测试时通过 `setEdgeTimeoutMs(200)` 缩短超时验证
+
+#### Latest-wins 实现
+
+```
+speak(text):
+  1. m_generation++
+  2. stopPlayer()          ← 停止旧播放
+  3. killEdgeProcess()     ← kill 旧 Edge 进程 + disconnect
+  4. cancelPendingRequests() ← cancel VoiceVox pending
+  5. m_edgeTimeoutTimer->stop()
+  6. cleanupTempFiles()
+  7. if EdgeTts: startEdgeTts(sanitized, gen)
+  8. if VoiceVox: m_vvClient->synthesize(...)
+
+stop():
+  - 同样流程（m_generation++ + 停止一切 + 清理）
+```
+
+#### Edge 合成流程
+
+```
+1. sanitized = remove HTML tags
+2. unique dir: DesktopPetTts/<pid>/<requestId>/
+3. write input.txt (UTF-8)
+4. QProcess::start(executable, {--file, input, --voice, ..., --write-media, output.mp3})
+5. wait for finished
+6. check exitCode==0 + output.mp3 exists + size>0
+7. QMediaPlayer::setSource(output.mp3) + play()
+8. on EndOfMedia: cleanupTempFiles()
+```
+
+参数通过 QStringList 传递（禁止 cmd.exe / PowerShell / system() / shell 字符串拼接）。
+
+#### 测试（14 项，EdgeTtsEngineTest）
+
+| # | 测试名 | 场景 | Mock env |
+|---|--------|------|----------|
+| 1 | testNormalSynthesis | 正常合成 → 播放链 | 默认 |
+| 2 | testPluginNotFound | Edge 插件不存在 | path → 不存在 |
+| 3 | testProcessStartFailed | QProcess 启动失败 | path → 无效命令 |
+| 4 | testNonZeroExit | 非零退出码 | MOCK_EDGE_EXIT_CODE=1 |
+| 5 | testEmptyOutput | 输出文件为空 | MOCK_EDGE_OUTPUT_SIZE=0 |
+| 6 | testTimeout | 合成超时 | MOCK_EDGE_DELAY_SEC=1, timeout=200ms |
+| 7 | testLatestWins | 连续两次 speak | delay 2s then 0s |
+| 8 | testSwitchToVoiceVoxDuringEdge | Edge→VV 中途切后端 | — |
+| 9 | testSwitchFromVoiceVoxToEdge | VV→Edge 中途切后端 | — |
+| 10 | testDisabledThenSpeak | disable 后 speak 不启动 | — |
+| 11 | testStop | stop 后无旧回调 | delay 0.5s |
+| 12 | testDestructorCleanup | 析构无残留 | delay 0.5s |
+| 13 | testChineseAndSpecialChars | 中文/引号通过 UTF-8 txt | — |
+| 14 | testSpacesInPath | 含空格/中文路径 | — |
+
+所有测试使用 `mock_edge_tts.bat` + `mock_edge_tts.py`（env var 控制行为），不访问真实 Edge TTS 服务。
+
+#### 已修复记录（2026-07-05 第三轮）
+
+**原始状态：** EdgeTtsEngineTest 14 项测试中 11 项 FAIL + 3 项 PASS（含 fixture 共 5/16 PASS）。
+
+**已修复的四个问题：**
+
+| 问题 | 根因 | 修复 | 性质 |
+|------|------|------|------|
+| mock 音频不可播放 | QMediaPlayer 收到假 MP3 → FormatError → 断言失败 | `mock_edge_tts.py` 生成有效 PCM WAV（8000Hz mono 16-bit） | mock 缺陷 |
+| CMake 部署路径错 | `configure_file` 复制到 `build/tests/`，exe 在 `build/tests/Release/` | 增加 `add_custom_command(POST_BUILD ...)` 复制到 `$<TARGET_FILE_DIR:test_tts>` | CMake 缺陷 |
+| testLatestWins temp dir 时序 | 有效 WAV 播放结束自动 cleanup，检查时 dir 已被删 | 在 `speak()` 后立即检查 temp dir（播放未完成时） | 测试时序 |
+| testSpacesInPath 缺 .py 文件 | 只复制 `.bat` 到带空格 temp 目录，`%~dp0` 找不到 `.py` | 同时复制 `mock_edge_tts.py`，清理时一并移除 | 测试缺文件 |
+
+**当前测试结果（连续两次通过）：**
+```
+VoiceVoxClientTest: 11/11 PASS  (6.3s / 6.4s)
+TtsEngineTest:       8/8  PASS  (7.5s / 7.5s)
+EdgeTtsEngineTest:  16/16 PASS  (10.7s / 10.7s)
+──────────────────────────────────────
+3 suites, 3 passed, 0 failed
+```
+
+- 无残留进程（Python/QProcess 均已退出）
+- 无临时 MP3/WAV 文件
+- 不使用硬编码路径，mock 文件通过 CMake POST_BUILD 自动复制
+
+**已知限制（留阶段 3）：**
+1. 真实 `edge-tts` CLI 尚未安装，CI/用户端首次运行需要先执行 `tools/edge_tts/install_edge_tts.bat`
+2. Edge 语音列表查询（`availableVoices()`）返回空列表，待阶段 3 补实现
+3. SettingsWindow Edge 设置面板未实现
+4. **QProcess 所有权潜在风险**（当前无运行时崩溃，建议阶段 3 前修复）：
+   - `deleteLater()` + `parent=this` 混用 → pending deleteLater 但 parent 析构 → 可能 double delete
+   - `onEdgeFinished` 成功路径不调用 `killEdgeProcess` → `m_edgeProcess` 指针残留
+   - `waitForFinished(1000)` 在析构路径运行嵌套事件循环
+
+**已删除的 SAPI 遗留物（阶段 1）：**
 - `enum Backend::SAPI`（值 0 被 `EdgeTts` 取代，语义不同但数值相同）
 - PowerShell `System.Speech.SpeechSynthesizer` 常驻进程
 - PowerShell `Media.SoundPlayer.PlaySync()` WAV 播放
