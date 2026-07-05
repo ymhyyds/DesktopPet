@@ -3,6 +3,8 @@
 
 #include <QMediaPlayer>
 #include <QAudioOutput>
+#include <QMediaDevices>
+#include <QAudioDevice>
 #include <QDebug>
 #include <QCoreApplication>
 #include <QRegularExpression>
@@ -54,6 +56,14 @@ TtsEngine::TtsEngine(QObject *parent)
     m_edgeTimeoutTimer = new QTimer(this);
     m_edgeTimeoutTimer->setSingleShot(true);
     connect(m_edgeTimeoutTimer, &QTimer::timeout, this, &TtsEngine::onEdgeTimeout);
+
+    // ── 音频输出设备管理 ──
+    m_mediaDevices = new QMediaDevices(this);
+    connect(m_mediaDevices, &QMediaDevices::audioOutputsChanged, this, [this]() {
+        qInfo() << "[TtsEngine] 音频输出设备列表已变更";
+        refreshAudioOutputDevice();
+    });
+    refreshAudioOutputDevice();
 
     // ── 读取设置并执行旧配置迁移 ──
     QSettings settings(QStringLiteral("DesktopPet"), QStringLiteral("TtsEngine"));
@@ -367,12 +377,50 @@ void TtsEngine::handleAudioReady(int requestId, const QByteArray &wavData)
     m_currentTempDir = tmpDir;
     m_currentTempRequestId = requestId;
 
+    // ★ 刷新音频输出设备
+    refreshAudioOutputDevice();
+    if (!m_audioDeviceAvailable) {
+        qInfo() << "[TtsEngine] 无可用音频设备，丢弃 VoiceVox 音频";
+        cleanupTempFiles();
+        emit playbackFinished(static_cast<int>(m_backend));
+        return;
+    }
+
     // 通过统一播放器播放
     m_mediaPlayer->setSource(QUrl::fromLocalFile(wavPath));
     m_mediaPlayer->play();
 
     emit statusChanged(static_cast<int>(VoiceVox),
         QStringLiteral("VoiceVox 播放中"));
+}
+
+// ============================================================================
+// 音频输出设备刷新
+// ============================================================================
+
+void TtsEngine::refreshAudioOutputDevice()
+{
+    const QList<QAudioDevice> outputs = QMediaDevices::audioOutputs();
+    const QAudioDevice defaultDevice = QMediaDevices::defaultAudioOutput();
+
+    if (outputs.isEmpty() || defaultDevice.isNull()) {
+        if (m_audioDeviceAvailable) {
+            qInfo() << "[TtsEngine] 无可用音频输出设备，标记为不可用";
+            m_audioDeviceAvailable = false;
+        }
+        return;
+    }
+
+    m_audioDeviceAvailable = true;
+
+    // 仅在设备实际变更时切换（不修改 volume / muted）
+    const QAudioDevice currentDevice = m_audioOutput->device();
+    if (currentDevice.id() != defaultDevice.id()) {
+        qInfo() << "[TtsEngine] 切换音频输出设备:"
+                << currentDevice.description()
+                << "->" << defaultDevice.description();
+        m_audioOutput->setDevice(defaultDevice);
+    }
 }
 
 // ============================================================================
@@ -692,6 +740,16 @@ void TtsEngine::onEdgeFinished(int exitCode, QProcess::ExitStatus exitStatus)
             QStringLiteral("Edge TTS 输出文件为空"));
         cleanupTempFiles();
         killEdgeProcess();
+        return;
+    }
+
+    // ★ 刷新音频输出设备
+    refreshAudioOutputDevice();
+    if (!m_audioDeviceAvailable) {
+        qInfo() << "[TtsEngine] 无可用音频设备，丢弃 Edge TTS 音频";
+        cleanupTempFiles();
+        // 进程已正常结束，不需 killEdgeProcess
+        emit playbackFinished(static_cast<int>(m_backend));
         return;
     }
 

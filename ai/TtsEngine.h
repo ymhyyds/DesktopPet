@@ -9,6 +9,7 @@
 
 class QMediaPlayer;
 class QAudioOutput;
+class QMediaDevices;
 class VoiceVoxClient;
 
 /**
@@ -89,6 +90,7 @@ private:
     void killEdgeProcess();
     void cleanupTempFiles();
     void handleAudioReady(int requestId, const QByteArray &wavData);
+    void refreshAudioOutputDevice();
 
     // --- Edge TTS 子流程 ---
     void startEdgeTts(const QString &sanitized, int gen);
@@ -110,6 +112,10 @@ private:
     // --- 统一播放层 (Qt Multimedia) ---
     QMediaPlayer *m_mediaPlayer = nullptr;
     QAudioOutput *m_audioOutput = nullptr;
+
+    // --- 音频输出设备管理 ---
+    QMediaDevices *m_mediaDevices = nullptr;
+    bool m_audioDeviceAvailable = true;
 
     // --- 临时文件跟踪 ---
     QString m_currentTempDir;
