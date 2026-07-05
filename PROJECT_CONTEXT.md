@@ -1,11 +1,12 @@
 # DesktopPet 项目上下文
 
-> 最后更新: 2026-07-05 (阶段2 全部完成 + CLI 实机验证通过 — 提交 24dfae8，标签 checkpoint-edge-tts-phase2)
-> 当前分支: feature/edge-tts-voicevox-only
+> 最后更新: 2026-07-05 (时间/天气感知 验证进行中 — 分支 fix/time-weather-awareness-hardening)
+> 当前分支: fix/time-weather-awareness-hardening（未提交）
 > 阶段1 完成度: 代码 100%, 单元测试 100% (19/19)
 > 阶段2 完成度: 代码 100%, 单元测试 100% (35/35), CMake/mock/测试修复全部完成
 > 阶段2 提交: 24dfae8 feat: add Edge TTS CLI backend and tests
 > 阶段2 标签: checkpoint-edge-tts-phase2
+> 天气/时间硬化: 代码完成; 预提交验证发现 test_tts 崩溃（WeatherManagerTest::testTimeout 中 onTimeout() 在 QNetworkReply::abort() → 同步触发 onReplyFinished 置 null 后再次 deleteLater 导致段错误）
 > 项目路径: `C:\Users\余敏涵\Desktop\DesktopPet`
 
 ---
@@ -2823,3 +2824,134 @@ else                    → Hidden（双窗口同步隐藏）
 - ✅ ai/TtsEngine.cpp 已恢复至 HEAD（无差异）
 - ✅ Release 构建：0 errors, 0 warnings
 - ✅ 两个独立提交，工作区干净
+
+---
+
+## 时间/天气感知硬化 — 交接记录（2026-07-05）
+
+### 分支
+
+```
+fix/time-weather-awareness-hardening（从 feature/edge-tts-voicevox-only 创建，未提交）
+```
+
+### 已完成
+
+| 改动 | 文件 |
+|------|------|
+| **WeatherManager 新类** — QNetworkAccessManager 异步获取，不阻塞 UI | `core/WeatherManager.h/.cpp` |
+| **wttr.in format=j1** — 使用 JSON 格式而非旧文本格式 | `core/WeatherManager.cpp` |
+| **current_condition[0] 解析** — temp_C, FeelsLikeC, humidity, weatherDesc[0].value, localObsDateTime | `core/WeatherManager.cpp:196-253` |
+| **nearest_area 解析** — 仅提取城市名作为"大致地区"，不声称精确定位 | `core/WeatherManager.cpp:230-238` |
+| **10 秒请求超时** — setTransferTimeout + 备用 QTimer | `core/WeatherManager.cpp:45,48,176-190` |
+| **HTTP 状态检查** — 仅接受 200，其余视为失败 | `core/WeatherManager.cpp:149` |
+| **JSON 解析错误处理** — QJsonParseError, 空数组/空字段检查 | `core/WeatherManager.cpp:196-253` |
+| **字符串清洗** — 去控制字符 + trimmed + 最长 200 字符 | `core/WeatherManager.cpp:270-279` |
+| **防重复并发请求** — m_requestPending 标志 | `core/WeatherManager.cpp:33-36` |
+| **防旧请求覆盖新结果** — cleanupRequest + timeout 双重防护 | `core/WeatherManager.cpp:39-40,131-173` |
+| **30 分钟缓存** — m_cacheExpiry + m_cacheDurationMs | `core/WeatherManager.cpp:56-61,163` |
+| **缓存过期标记** — buildWeatherContext 自动追加"天气数据可能已过期" | `core/WeatherManager.cpp:88-90` |
+| **失败降级** — 保留最后一次有效缓存，不清除 | `core/WeatherManager.cpp:152-156,186-188` |
+| **UTC 偏移** — formatUtcOffset 静态方法 + Prompt 注入 UTC+08:00 | `core/WeatherManager.cpp:95-106` + `ai/PromptManager.cpp:51-59` |
+| **Prompt 环境信息格式** — `[当前环境信息]\n本地时间：...UTC+...\n大致地区：...\n天气：...\n[/当前环境信息]` | `ai/PromptManager.cpp:38-77` |
+| **只注入本次请求副本** — 通过 contextHistory() 的 system 消息附加，不写入聊天 UI/DB/长期历史 | `ai/PromptManager.cpp:100-116` |
+| **普通聊天和 idle 都注入** — 两者共用 contextHistory() | 连接在 `App.cpp:398-432,438-445` |
+| **App 改用 WeatherManager** — 移除旧 fetchWeather() 和 m_weatherDescription | `core/App.h/.cpp` |
+| **PromptManager 改用天气上下文字段** — m_weatherDesc → m_weatherContext | `ai/PromptManager.h/.cpp` |
+| **Mock 天气服务器** — Python HTTP server 返回 j1 JSON，支持 error/delay/response-type 控制 | `tests/MockWeatherServer.py` |
+| **WeatherManager 测试（12 项）** — 正常 j1，非 JSON，HTTP 500，超时，current_condition 缺失，weatherDesc 缺失，空响应体，缓存命中，缓存过期，失败用旧缓存，天气失败不阻断 | `tests/WeatherManagerTest.cpp` |
+| **PromptManager 天气集成测试（7 项）** — 含天气/不含天气/禁用时间感知/contextHistory 注入/挂机注入/不污染历史/清除天气 | `tests/WeatherManagerTest.cpp` |
+| **CMake 构建系统** — WeatherManager 加入 CORE_SOURCES，测试加入 test_tts target | `CMakeLists.txt` + `tests/CMakeLists.txt` |
+
+### 尚未完成 / 预提交验证状态
+
+1. ~~自动定时刷新~~ — 已实现 `WeatherManager::startAutoRefresh()`，`stopAutoRefresh()`，含 QTimer + m_requestPending 防并发 + 析构清理。
+2. ~~Release 构建~~ — `cmake --build build --config Release` 测试 target (test_tts) 成功，主 exe 因 DesktopPet.exe 运行中链接失败。
+3. **CTest** — 未执行（当前阶段跳过）。
+4. **test_tts 验证** — ❌ 崩溃。
+
+#### test_tts 崩溃诊断
+
+**症状：** `WeatherManagerTest::testTimeout` 中 `onTimeout()` 调用 `m_activeReply->abort()` 时，该调用**同步触发** `m_activeReply` 的 `finished` 信号 → `onReplyFinished()` 执行 → 将 `m_activeReply` 置 `nullptr` 并 `deleteLater` → 返回 `onTimeout()` 后 `m_activeReply->deleteLater()` 在空指针上调用 → **段错误崩溃** (0xc0000005)。
+
+**根因：** `onTimeout()` 在 `abort()` 前未 `disconnect()` 活动 reply，也未将本地指针先置 null 再 abort。
+
+**修复方法**（以 `cleanupRequest()` 为模板）：
+```cpp
+void WeatherManager::onTimeout()
+{
+    if (m_activeReply) {
+        auto *reply = m_activeReply;
+        m_activeReply = nullptr;
+        reply->disconnect();
+        reply->abort();
+        reply->deleteLater();
+    }
+    m_requestPending = false;
+    // ...原有逻辑...
+}
+```
+
+**此前未被触发的条件：** `MockWeatherServer.py` 缺少 `do_POST` → `setDelay/setError/setResponseType` 均无效 → 超时测试仅走最短路径。添加 `do_POST` 后控制指令生效，超时真实发生，触发此竞态。
+
+**其他已发现的测试问题：**
+| 问题 | 根因 | 状态 |
+|------|------|------|
+| MockWeatherServer.py 缺 do_POST | MockServerHelper.cpp 用 POST 发控制指令，MockServer 只有 do_GET | ✅ 已修复 |
+| `testFailureWithStaleCache` 和 `testAutoRefreshFailureKeepsStaleCache` 缓存不过期 | `setCacheDuration` 在请求之后调用，不影响已设置的 m_cacheExpiry | ✅ 已修复（移动 `setCacheDuration` 到 `requestWeather` 之前） |
+| `testDestructorNoTimerCallback` 信号标志不重置 | `signalAfterDestroy` 在析构前的合法更新中被置 true 后未重置 | ✅ 已修复 |
+
+### 当前修改文件
+
+
+**已修改（8 个）：**
+```
+M CMakeLists.txt              # +WeatherManager 源文件
+M PROJECT_CONTEXT.md          # 本文档，持续更新
+M ai/PromptManager.cpp        # +UTC偏移 +新格式 buildEnvironmentContext
+M ai/PromptManager.h          # setWeatherDescription→setWeatherContext
+M core/App.cpp                # -旧fetchWeather +WeatherManager 连接
+M core/App.h                  # +m_weatherManager 前置声明和成员
+M tests/CMakeLists.txt        # +WeatherManager 测试源和 mock 服务器
+M tests/test_main.cpp         # +WeatherManagerTest +PromptManagerWeatherTest
+```
+
+**新增（6 个）：**
+```
+?? core/WeatherManager.cpp    # WeatherManager 全实现
+?? core/WeatherManager.h      # 类声明（含 QTimer 自动刷新）
+?? tests/MockServer.h         # MockServer 结构体提取为独立头文件
+?? tests/MockWeatherServer.py # Python mock wttr.in 服务器
+?? tests/WeatherManagerTest.cpp   # 12 项 WeatherManager 测试 + 7 项 PromptManager 天气测试
+?? tests/WeatherManagerTest.h     # 测试类声明（头文件以支持 AUTOMOC）
+```
+
+**总计：14 个文件，0 已暂存。**
+
+**新增（4 个）：**
+```
+A core/WeatherManager.h       # 天气管理器声明
+A core/WeatherManager.cpp     # 280 行实现
+A tests/MockWeatherServer.py  # mock wttr.in j1 HTTP server
+A tests/WeatherManagerTest.cpp# 19 项测试
+```
+
+### 已知风险 / 编译状态
+
+| 项目 | 状态 |
+|------|------|
+| cmake 工具 | ❌ 当前环境无 MSVC/cmake，未编译 |
+| 语法正确性 | ✅ 已逐行审查，包括信号/槽签名、JSON 解析、边界条件、缓存逻辑 |
+| CRLF 行尾 | ⚠️ 新文件使用 LF，Git checkout 时自动转换，不影响编译 |
+| setTransferTimeout | ✅ 需要 Qt 5.15+（项目使用 Qt 6.11.1） |
+| QTest::qSleep | ✅ 测试中用于等待缓存过期，不影响事件循环 |
+| MockServer 端口冲突 | ✅ 绑定 127.0.0.1:0（OS 分配端口），各套件独立 start/stop |
+
+### 下一窗口从 WeatherManager 自动刷新继续
+
+建议后续工作：
+1. 在正确环境中编译并通过全部测试
+2. 添加 `WeatherManager::startAutoRefresh()` — 每 30 分钟定时调用 `requestWeather()`
+3. 在 `App::initialize()` 中调用 `m_weatherManager->startAutoRefresh()`
+4. 可选：添加 SettingsWindow 开关控制天气功能
+5. 不修改 TTS、全屏、Live2D、双击、智能穿透等无关功能
