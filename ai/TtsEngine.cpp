@@ -9,7 +9,11 @@
 #include <QSettings>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QUrl>
+#include <QProcess>
+#include <QTimer>
+#include <QStandardPaths>
 
 TtsEngine::TtsEngine(QObject *parent)
     : QObject(parent)
@@ -44,6 +48,11 @@ TtsEngine::TtsEngine(QObject *parent)
             m_mediaPlayer->setSource(QUrl());
             cleanupTempFiles();
         });
+
+    // ── Edge TTS 超时定时器 ──
+    m_edgeTimeoutTimer = new QTimer(this);
+    m_edgeTimeoutTimer->setSingleShot(true);
+    connect(m_edgeTimeoutTimer, &QTimer::timeout, this, &TtsEngine::onEdgeTimeout);
 
     // ── 读取设置并执行旧配置迁移 ──
     QSettings settings(QStringLiteral("DesktopPet"), QStringLiteral("TtsEngine"));
@@ -84,7 +93,15 @@ TtsEngine::TtsEngine(QObject *parent)
         }
     }
 
-    // ── 恢复 VoiceVox 配置（不变） ──
+    // ── 恢复 Edge TTS 设置 ──
+    m_edgeExecutablePath = settings.value(QStringLiteral("edgeExecutablePath")).toString();
+    m_edgeVoice = settings.value(QStringLiteral("edgeVoice"),
+        QStringLiteral("zh-CN-XiaoyiNeural")).toString();
+    m_edgeRatePercent = settings.value(QStringLiteral("edgeRatePercent"), 5).toInt();
+    m_edgeVolumePercent = settings.value(QStringLiteral("edgeVolumePercent"), 0).toInt();
+    m_edgePitchHz = settings.value(QStringLiteral("edgePitchHz"), 15).toInt();
+
+    // ── 恢复 VoiceVox 配置 ──
     m_vvUrl = settings.value(QStringLiteral("vvUrl"),
         QStringLiteral("http://127.0.0.1:50021")).toString();
     m_vvStyleId = settings.value(QStringLiteral("vvStyleId"), 0).toInt();
@@ -123,6 +140,7 @@ TtsEngine::TtsEngine(QObject *parent)
 
 TtsEngine::~TtsEngine()
 {
+    // 超时定时器自动随父对象析构
     stop();
 }
 
@@ -168,7 +186,7 @@ void TtsEngine::setBackend(Backend backend)
 QStringList TtsEngine::availableVoices()
 {
     if (m_backend == EdgeTts) {
-        // Phase 1: Edge CLI 尚未接入
+        // Stage 2: 尚未实现 Edge 语音列表查询（阶段 3 会补上）
         return {};
     }
 
@@ -184,7 +202,7 @@ QStringList TtsEngine::availableVoices()
 void TtsEngine::setVoice(const QString &voiceDisplayName)
 {
     if (m_backend == EdgeTts) {
-        // Phase 1: 暂时不处理 Edge 语音选择
+        // Stage 2: Edge 语音选择通过 setEdgeVoice() 单独设置
         return;
     }
 
@@ -240,18 +258,16 @@ void TtsEngine::speak(const QString &text)
 
     // 停止当前播放和合成
     stopPlayer();
+    killEdgeProcess();
     m_vvClient->cancelPendingRequests();
     cleanupTempFiles();
 
-    if (m_backend == EdgeTts) {
-        // Phase 1: Edge CLI 尚未接入
-        qInfo() << "[TtsEngine] Edge TTS 将在第二阶段接入";
-        emit statusChanged(static_cast<int>(EdgeTts),
-            QStringLiteral("Edge TTS 尚未接入"));
-        return;
-    }
+    // 停止超时定时器（killEdgeProcess 不负责停定时器）
+    m_edgeTimeoutTimer->stop();
 
-    if (m_backend == VoiceVox) {
+    if (m_backend == EdgeTts) {
+        startEdgeTts(sanitized, gen);
+    } else if (m_backend == VoiceVox) {
         m_vvClient->synthesize(sanitized, m_vvStyleId, gen);
         emit statusChanged(static_cast<int>(VoiceVox),
             QStringLiteral("VoiceVox 合成中..."));
@@ -266,7 +282,9 @@ void TtsEngine::stop()
 {
     m_generation++;
     stopPlayer();
+    killEdgeProcess();
     m_vvClient->cancelPendingRequests();
+    m_edgeTimeoutTimer->stop();
     cleanupTempFiles();
 }
 
@@ -384,4 +402,380 @@ void TtsEngine::setVoiceVoxUrl(const QString &url)
 QString TtsEngine::voiceVoxUrl() const
 {
     return m_vvUrl;
+}
+
+// ============================================================================
+// Edge TTS 配置 getter/setter（立即持久化）
+// ============================================================================
+
+void TtsEngine::setEdgeExecutablePath(const QString &path)
+{
+    m_edgeExecutablePath = path;
+    QSettings(QStringLiteral("DesktopPet"), QStringLiteral("TtsEngine"))
+        .setValue(QStringLiteral("edgeExecutablePath"), path);
+}
+
+QString TtsEngine::edgeExecutablePath() const
+{
+    return m_edgeExecutablePath;
+}
+
+void TtsEngine::setEdgeVoice(const QString &voice)
+{
+    m_edgeVoice = voice;
+    QSettings(QStringLiteral("DesktopPet"), QStringLiteral("TtsEngine"))
+        .setValue(QStringLiteral("edgeVoice"), voice);
+}
+
+QString TtsEngine::edgeVoice() const
+{
+    return m_edgeVoice;
+}
+
+void TtsEngine::setEdgeRatePercent(int percent)
+{
+    m_edgeRatePercent = percent;
+    QSettings(QStringLiteral("DesktopPet"), QStringLiteral("TtsEngine"))
+        .setValue(QStringLiteral("edgeRatePercent"), percent);
+}
+
+int TtsEngine::edgeRatePercent() const
+{
+    return m_edgeRatePercent;
+}
+
+void TtsEngine::setEdgeVolumePercent(int percent)
+{
+    m_edgeVolumePercent = percent;
+    QSettings(QStringLiteral("DesktopPet"), QStringLiteral("TtsEngine"))
+        .setValue(QStringLiteral("edgeVolumePercent"), percent);
+}
+
+int TtsEngine::edgeVolumePercent() const
+{
+    return m_edgeVolumePercent;
+}
+
+void TtsEngine::setEdgePitchHz(int hz)
+{
+    m_edgePitchHz = hz;
+    QSettings(QStringLiteral("DesktopPet"), QStringLiteral("TtsEngine"))
+        .setValue(QStringLiteral("edgePitchHz"), hz);
+}
+
+int TtsEngine::edgePitchHz() const
+{
+    return m_edgePitchHz;
+}
+
+void TtsEngine::setEdgeTimeoutMs(int ms)
+{
+    m_edgeTimeoutMs = ms;
+}
+
+// ============================================================================
+// 插件发现 — 5 级优先级
+// ============================================================================
+
+QString TtsEngine::resolveEdgeExecutable() const
+{
+    // 1. QSettings 指定的路径（用户手动配置）
+    if (!m_edgeExecutablePath.isEmpty()) {
+        QFileInfo fi(m_edgeExecutablePath);
+        if (fi.exists() && fi.isFile()) {
+            return fi.absoluteFilePath();
+        }
+    }
+
+    // 2. 项目开发目录：tools/edge_tts/.venv/Scripts/edge-tts.exe
+    {
+        const QString devPath = QDir::cleanPath(QCoreApplication::applicationDirPath()
+            + QStringLiteral("/../../tools/edge_tts/.venv/Scripts/edge-tts.exe"));
+        QFileInfo fi(devPath);
+        if (fi.exists() && fi.isFile()) {
+            return fi.absoluteFilePath();
+        }
+    }
+
+    // 3. 应用 plugins 目录：plugins/edge-tts/edge-tts.exe
+    {
+        const QString pluginPath = QDir::cleanPath(QCoreApplication::applicationDirPath()
+            + QStringLiteral("/plugins/edge-tts/edge-tts.exe"));
+        QFileInfo fi(pluginPath);
+        if (fi.exists() && fi.isFile()) {
+            return fi.absoluteFilePath();
+        }
+    }
+
+    // 4. 系统 PATH 中查找 edge-tts.exe
+    {
+        const QString exe = QStandardPaths::findExecutable(QStringLiteral("edge-tts.exe"));
+        if (!exe.isEmpty()) {
+            return exe;
+        }
+    }
+
+    // 5. 系统 PATH 中查找 edge-tts（无扩展名）
+    {
+        const QString exe = QStandardPaths::findExecutable(QStringLiteral("edge-tts"));
+        if (!exe.isEmpty()) {
+            return exe;
+        }
+    }
+
+    return {};
+}
+
+// ============================================================================
+// CLI 参数格式化
+// ============================================================================
+
+QString TtsEngine::formatEdgePercent(int percent)
+{
+    if (percent >= 0) {
+        return QStringLiteral("+%1%").arg(percent);
+    }
+    // percent < 0: 字符串中的负号自带 "-"
+    return QStringLiteral("%1%").arg(percent);
+}
+
+QString TtsEngine::formatEdgeHz(int hz)
+{
+    if (hz >= 0) {
+        return QStringLiteral("+%1Hz").arg(hz);
+    }
+    return QStringLiteral("%1Hz").arg(hz);
+}
+
+// ============================================================================
+// Edge TTS 合成启动
+// ============================================================================
+
+void TtsEngine::startEdgeTts(const QString &sanitized, int gen)
+{
+    // ── 解析可执行文件 ──
+    const QString executable = resolveEdgeExecutable();
+    if (executable.isEmpty()) {
+        qWarning() << "[TtsEngine] Edge TTS 插件不存在 (req=" << gen << ")";
+        emit errorOccurred(static_cast<int>(EdgeTts),
+            QStringLiteral("Edge TTS 插件不存在"));
+        return;
+    }
+
+    // ── 创建唯一临时目录 ──
+    const QString tmpDir = QDir::tempPath()
+        + QStringLiteral("/DesktopPetTts/")
+        + QString::number(QCoreApplication::applicationPid())
+        + QStringLiteral("/")
+        + QString::number(gen);
+
+    QDir().mkpath(tmpDir);
+
+    // ── 写入 input.txt（UTF-8） ──
+    const QString inputPath = tmpDir + QStringLiteral("/input.txt");
+    {
+        QFile f(inputPath);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            qWarning() << "[TtsEngine] 无法写入输入文件:" << inputPath;
+            emit errorOccurred(static_cast<int>(EdgeTts),
+                QStringLiteral("无法写入 Edge TTS 输入文件"));
+            QDir(tmpDir).rmdir(tmpDir);
+            return;
+        }
+        f.write(sanitized.toUtf8());
+        f.close();
+    }
+
+    // ── 输出路径 ──
+    const QString outputPath = tmpDir + QStringLiteral("/output.mp3");
+
+    // ── 构建 CLI 参数（QStringList，禁止 shell 拼接） ──
+    QStringList args;
+    args << QStringLiteral("--file") << inputPath;
+    args << QStringLiteral("--voice") << m_edgeVoice;
+    args << QStringLiteral("--rate") << formatEdgePercent(m_edgeRatePercent);
+    args << QStringLiteral("--volume") << formatEdgePercent(m_edgeVolumePercent);
+    args << QStringLiteral("--pitch") << formatEdgeHz(m_edgePitchHz);
+    args << QStringLiteral("--write-media") << outputPath;
+
+    // ── 记录当前临时目录以便 cleanup ──
+    m_currentTempDir = tmpDir;
+    m_currentTempRequestId = gen;
+
+    // ── 创建 QProcess ──
+    m_edgeProcess = new QProcess(this);
+    m_edgeProcessGeneration = gen;
+
+    connect(m_edgeProcess, &QProcess::started, this, &TtsEngine::onEdgeStarted);
+    connect(m_edgeProcess,
+        QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+        this, &TtsEngine::onEdgeFinished);
+    connect(m_edgeProcess, &QProcess::errorOccurred, this, &TtsEngine::onEdgeErrorOccurred);
+
+    // ── 启动超时定时器 ──
+    m_edgeTimeoutGeneration = gen;
+    m_edgeTimeoutTimer->start(m_edgeTimeoutMs);
+
+    // ── 启动进程 ──
+    m_edgeProcess->start(executable, args);
+
+    qInfo() << "[TtsEngine] Edge TTS 启动 (req=" << gen
+            << "textLength=" << sanitized.length()
+            << "voice=" << m_edgeVoice
+            << "rate=" << m_edgeRatePercent
+            << "volume=" << m_edgeVolumePercent
+            << "pitch=" << m_edgePitchHz << ")";
+
+    emit statusChanged(static_cast<int>(EdgeTts),
+        QStringLiteral("Edge TTS 合成中..."));
+}
+
+// ============================================================================
+// Edge TTS QProcess 生命周期
+// ============================================================================
+
+void TtsEngine::onEdgeStarted()
+{
+    // QProcess 已成功启动，无需额外操作。
+    // 状态已由 startEdgeTts 发射。
+}
+
+void TtsEngine::onEdgeFinished(int exitCode, QProcess::ExitStatus exitStatus)
+{
+    // 停止超时定时器
+    m_edgeTimeoutTimer->stop();
+
+    // 校验：是否仍为当前请求
+    if (m_edgeProcessGeneration != m_generation) {
+        qInfo() << "[TtsEngine] 丢弃过期 Edge TTS 结果 (req="
+                << m_edgeProcessGeneration << "gen=" << m_generation << ")";
+        // 进程指针已在 killEdgeProcess 中清理，此处只做校验
+        return;
+    }
+
+    if (!m_enabled) {
+        qInfo() << "[TtsEngine] TTS 已关闭，丢弃 Edge TTS 结果";
+        return;
+    }
+
+    // 检查退出状态
+    if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+        qWarning() << "[TtsEngine] Edge TTS 进程异常退出 (req="
+                   << m_edgeProcessGeneration
+                   << "exitStatus=" << exitStatus
+                   << "exitCode=" << exitCode << ")";
+        emit errorOccurred(static_cast<int>(EdgeTts),
+            QStringLiteral("Edge TTS 合成失败（退出码 %1）").arg(exitCode));
+        cleanupTempFiles();
+        // 清理进程指针
+        killEdgeProcess();
+        return;
+    }
+
+    // 检查输出文件
+    const QString outputPath = m_currentTempDir + QStringLiteral("/output.mp3");
+    QFileInfo fi(outputPath);
+    if (!fi.exists()) {
+        qWarning() << "[TtsEngine] Edge TTS 输出文件不存在 (req="
+                   << m_edgeProcessGeneration << ")";
+        emit errorOccurred(static_cast<int>(EdgeTts),
+            QStringLiteral("Edge TTS 输出文件不存在"));
+        cleanupTempFiles();
+        killEdgeProcess();
+        return;
+    }
+    if (fi.size() == 0) {
+        qWarning() << "[TtsEngine] Edge TTS 输出文件为空 (req="
+                   << m_edgeProcessGeneration << ")";
+        emit errorOccurred(static_cast<int>(EdgeTts),
+            QStringLiteral("Edge TTS 输出文件为空"));
+        cleanupTempFiles();
+        killEdgeProcess();
+        return;
+    }
+
+    // 成功：通过统一播放器播放
+    m_mediaPlayer->setSource(QUrl::fromLocalFile(outputPath));
+    m_mediaPlayer->play();
+
+    qInfo() << "[TtsEngine] Edge TTS 播放 (req=" << m_edgeProcessGeneration
+            << "fileSize=" << fi.size() << ")";
+
+    emit statusChanged(static_cast<int>(EdgeTts),
+        QStringLiteral("Edge TTS 播放中"));
+}
+
+void TtsEngine::onEdgeErrorOccurred(QProcess::ProcessError error)
+{
+    m_edgeTimeoutTimer->stop();
+
+    if (m_edgeProcessGeneration != m_generation) {
+        // 已过期
+        return;
+    }
+
+    QString reason;
+    switch (error) {
+    case QProcess::FailedToStart:
+        reason = QStringLiteral("Edge TTS 进程启动失败");
+        break;
+    case QProcess::Crashed:
+        reason = QStringLiteral("Edge TTS 进程崩溃");
+        break;
+    case QProcess::Timedout:
+        reason = QStringLiteral("Edge TTS 进程超时");
+        break;
+    case QProcess::WriteError:
+        reason = QStringLiteral("Edge TTS 进程写入错误");
+        break;
+    case QProcess::ReadError:
+        reason = QStringLiteral("Edge TTS 进程读取错误");
+        break;
+    default:
+        reason = QStringLiteral("Edge TTS 进程未知错误");
+        break;
+    }
+
+    qWarning() << "[TtsEngine] Edge TTS 进程错误 (req="
+               << m_edgeProcessGeneration << "):" << reason;
+
+    emit errorOccurred(static_cast<int>(EdgeTts), reason);
+    cleanupTempFiles();
+    killEdgeProcess();
+}
+
+void TtsEngine::onEdgeTimeout()
+{
+    if (m_edgeTimeoutGeneration != m_generation) {
+        // 已过期
+        return;
+    }
+
+    qWarning() << "[TtsEngine] Edge TTS 合成超时 (req="
+               << m_edgeProcessGeneration << ")";
+    emit errorOccurred(static_cast<int>(EdgeTts),
+        QStringLiteral("Edge TTS 合成超时"));
+
+    killEdgeProcess();
+    cleanupTempFiles();
+}
+
+// ============================================================================
+// 终止 Edge TTS 进程
+// ============================================================================
+
+void TtsEngine::killEdgeProcess()
+{
+    m_edgeProcessGeneration = -1;
+    if (m_edgeProcess) {
+        // 断开所有信号，防止旧进程的延迟信号触发
+        m_edgeProcess->disconnect();
+        if (m_edgeProcess->state() != QProcess::NotRunning) {
+            m_edgeProcess->kill();
+            m_edgeProcess->waitForFinished(1000);
+        }
+        m_edgeProcess->deleteLater();
+        m_edgeProcess = nullptr;
+    }
+    m_edgeTimeoutTimer->stop();
 }

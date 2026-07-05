@@ -4,6 +4,9 @@
 #include <QString>
 #include <QStringList>
 
+#include <QProcess>
+#include <QTimer>
+
 class QMediaPlayer;
 class QAudioOutput;
 class VoiceVoxClient;
@@ -51,6 +54,29 @@ public:
     void setVoiceVoxUrl(const QString &url);
     QString voiceVoxUrl() const;
 
+    /// --- Edge TTS 配置（立即持久化到 QSettings） ---
+    void setEdgeExecutablePath(const QString &path);
+    QString edgeExecutablePath() const;
+
+    void setEdgeVoice(const QString &voice);
+    QString edgeVoice() const;
+
+    void setEdgeRatePercent(int percent);
+    int edgeRatePercent() const;
+
+    void setEdgeVolumePercent(int percent);
+    int edgeVolumePercent() const;
+
+    void setEdgePitchHz(int hz);
+    int edgePitchHz() const;
+
+    /// 超时毫秒（仅运行时，用于测试短超时，默认 30000）
+    void setEdgeTimeoutMs(int ms);
+    int edgeTimeoutMs() const { return m_edgeTimeoutMs; }
+
+    /// --- 插件发现 ---
+    QString resolveEdgeExecutable() const;
+
 signals:
     void VoiceVoxSpeakersReady();
     void statusChanged(int backend, const QString &statusText);
@@ -58,8 +84,20 @@ signals:
 
 private:
     void stopPlayer();
+    void killEdgeProcess();
     void cleanupTempFiles();
     void handleAudioReady(int requestId, const QByteArray &wavData);
+
+    // --- Edge TTS 子流程 ---
+    void startEdgeTts(const QString &sanitized, int gen);
+    void onEdgeStarted();
+    void onEdgeFinished(int exitCode, QProcess::ExitStatus exitStatus);
+    void onEdgeErrorOccurred(QProcess::ProcessError error);
+    void onEdgeTimeout();
+
+    // --- CLI 参数格式化 ---
+    static QString formatEdgePercent(int percent);
+    static QString formatEdgeHz(int hz);
 
 private:
     // --- 通用 ---
@@ -74,6 +112,22 @@ private:
     // --- 临时文件跟踪 ---
     QString m_currentTempDir;
     int m_currentTempRequestId = -1;
+
+    // --- Edge TTS QProcess ---
+    QProcess *m_edgeProcess = nullptr;
+    int m_edgeProcessGeneration = -1;  // generation when this process was started
+
+    // --- Edge TTS 超时 ---
+    QTimer *m_edgeTimeoutTimer = nullptr;
+    int m_edgeTimeoutGeneration = -1;  // generation the timeout was set for
+    int m_edgeTimeoutMs = 30000;
+
+    // --- Edge TTS 设置（从 QSettings 加载） ---
+    QString m_edgeExecutablePath;
+    QString m_edgeVoice = QStringLiteral("zh-CN-XiaoyiNeural");
+    int m_edgeRatePercent = 5;
+    int m_edgeVolumePercent = 0;
+    int m_edgePitchHz = 15;
 
     // --- VoiceVox ---
     VoiceVoxClient *m_vvClient = nullptr;

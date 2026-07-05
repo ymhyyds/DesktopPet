@@ -51,6 +51,33 @@ private slots:
     void testDestructorCleanup();
 };
 
+class EdgeTtsEngineTest : public QObject {
+    Q_OBJECT
+public:
+    explicit EdgeTtsEngineTest() = default;
+
+private slots:
+    void initTestCase();
+    void cleanupTestCase();
+    void init();
+    void cleanup();
+
+    void testNormalSynthesis();
+    void testPluginNotFound();
+    void testProcessStartFailed();
+    void testNonZeroExit();
+    void testEmptyOutput();
+    void testTimeout();
+    void testLatestWins();
+    void testSwitchToVoiceVoxDuringEdge();
+    void testSwitchFromVoiceVoxToEdge();
+    void testDisabledThenSpeak();
+    void testStop();
+    void testDestructorCleanup();
+    void testChineseAndSpecialChars();
+    void testSpacesInPath();
+};
+
 // ── Mock server helper ─────────────────────────────────────────────────────
 struct MockServer {
     QProcess *proc = nullptr;
@@ -68,6 +95,7 @@ struct MockServer {
 // ── Include all test implementations ───────────────────────────────────────
 #include "VoiceVoxClientTest.cpp"
 #include "TtsEngineTest.cpp"
+#include "EdgeTtsEngineTest.cpp"
 #include "MockServerHelper.cpp"
 
 // ── Main ───────────────────────────────────────────────────────────────────
@@ -79,7 +107,7 @@ int main(int argc, char *argv[])
     int total = 0, passed = 0, failed = 0;
 
     qDebug() << "\n==========================================";
-    qDebug() << "  TTS Unit Tests — Mock VoiceVox Server";
+    qDebug() << "  TTS Unit Tests — VoiceVox + Edge TTS Mocks";
     qDebug() << "==========================================\n";
 
     auto runSuite = [&](const QString &name, QObject &testObj) {
@@ -103,6 +131,10 @@ int main(int argc, char *argv[])
     {
         TtsEngineTest tc;
         runSuite(QStringLiteral("TtsEngine"), tc);
+    }
+    {
+        EdgeTtsEngineTest tc;
+        runSuite(QStringLiteral("EdgeTtsEngine"), tc);
     }
 
     qDebug() << "==========================================";

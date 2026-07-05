@@ -47,6 +47,9 @@ ui_*.h
 *.exp
 *.obj
 
+# Edge TTS virtual environment (install via tools/edge_tts/install_edge_tts.bat)
+tools/edge_tts/.venv/
+
 # OS
 .DS_Store
 Thumbs.db
