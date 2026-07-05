@@ -21,6 +21,7 @@ class DeepSeekClient;
 class PromptManager;
 class EmotionAnalyzer;
 class TtsEngine;
+class WeatherManager;
 class MemoryDB;
 class InteractionManager;
 class TrayManager;
@@ -66,7 +67,6 @@ public slots:
 
 private:
     void setupConnections();
-    void fetchWeather();
     void setupBedtimeReminder();
     /// 截取桌宠（和聊天窗口）截图，保存并复制到剪贴板
     void takeScreenshot();
@@ -136,6 +136,7 @@ private:
     std::unique_ptr<EmotionAnalyzer>   m_emotionAnalyzer;
     std::unique_ptr<DeepSeekClient>    m_aiClient;
     std::unique_ptr<TtsEngine>         m_ttsEngine;
+    std::unique_ptr<WeatherManager>    m_weatherManager;
 
     std::unique_ptr<WindowManager>     m_windowManager;
     std::unique_ptr<PetWindow>         m_petWindow;
@@ -148,9 +149,6 @@ private:
     std::unique_ptr<GlobalHotkeyManager> m_hotkeyManager;
 
     QString m_currentCharacter;
-
-    // 天气信息缓存
-    QString m_weatherDescription;
 
     // --- 深夜就寝提醒 ---
     QTimer *m_bedtimeTimer   = nullptr;

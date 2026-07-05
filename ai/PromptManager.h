@@ -62,18 +62,20 @@ public:
     void setTimeAwareness(bool enabled) { m_timeAwareness = enabled; }
     bool timeAwareness() const { return m_timeAwareness; }
 
-    /// 手动设置天气描述（例如从外部 API 获取后注入），空字符串表示"未知"。
-    void setWeatherDescription(const QString &desc) { m_weatherDesc = desc; }
+    /// 设置天气上下文字段（由 WeatherManager 构建的天气文本，不含时间部分）。
+    /// 空字符串表示无天气数据。
+    void setWeatherContext(const QString &ctx) { m_weatherContext = ctx; }
+
+    /// 构建时间/天气感知文本，追加到 system prompt 尾部。
+    QString buildEnvironmentContext() const;
 
 private:
     void trimHistoryIfNeeded();
-    /// 构建时间/天气感知文本，追加到 system prompt 尾部。
-    QString buildEnvironmentContext() const;
 
 private:
     QString m_systemPrompt;
     QList<ChatMessage> m_history; // 不包含 system 消息，role 只会是 "user"/"assistant"
     int m_maxHistoryTurns = 10;   // 默认保留最近 10 轮，平衡上下文连贯性和请求体大小
     bool m_timeAwareness = true;
-    QString m_weatherDesc;
+    QString m_weatherContext;     // 由 WeatherManager 构建，仅含天气部分
 };

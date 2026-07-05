@@ -41,53 +41,38 @@ QString PromptManager::buildEnvironmentContext() const
 
     const QDateTime now = QDateTime::currentDateTime();
     const int hour = now.time().hour();
-
-    // 时间段描述
-    QString timePeriod;
-    if (hour >= 5 && hour < 8) {
-        timePeriod = QStringLiteral("清晨");
-    } else if (hour >= 8 && hour < 12) {
-        timePeriod = QStringLiteral("上午");
-    } else if (hour >= 12 && hour < 14) {
-        timePeriod = QStringLiteral("中午");
-    } else if (hour >= 14 && hour < 18) {
-        timePeriod = QStringLiteral("下午");
-    } else if (hour >= 18 && hour < 22) {
-        timePeriod = QStringLiteral("晚上");
-    } else {
-        timePeriod = QStringLiteral("深夜");
-    }
+    Q_UNUSED(hour);
 
     // 星期几
     static const char *kWeekDays[] = { "一", "二", "三", "四", "五", "六", "日" };
     const int dayOfWeek = now.date().dayOfWeek(); // 1=周一, 7=周日
     const QString weekDay = QString::fromUtf8(kWeekDays[dayOfWeek - 1]);
 
-    // 构建环境上下文：注入到 system prompt 中
+    // UTC 偏移
+    const int offsetSecs = now.offsetFromUtc();
+    const int hours = offsetSecs / 3600;
+    const int mins = qAbs(offsetSecs % 3600) / 60;
+    const QString sign = (offsetSecs >= 0) ? QStringLiteral("+") : QStringLiteral("-");
+    const QString utcOffset = QStringLiteral("UTC%1%2:%3")
+        .arg(sign)
+        .arg(qAbs(hours), 2, 10, QChar('0'))
+        .arg(mins, 2, 10, QChar('0'));
+
     QString context;
 
-    // 时间信息
-    context += QStringLiteral(
-        "【当前环境信息】现在是%1年%2月%3日 星期%4 %5 %6。"
-    ).arg(QString::number(now.date().year()),
-          QString::number(now.date().month()),
-          QString::number(now.date().day()),
-          weekDay, timePeriod,
-          now.time().toString(QStringLiteral("HH:mm")));
+    context += QStringLiteral("[当前环境信息]\n");
+    context += QStringLiteral("本地时间：%1 %2 %3，%4")
+        .arg(now.toString(QStringLiteral("yyyy-MM-dd")),
+             weekDay,
+             now.toString(QStringLiteral("HH:mm")),
+             utcOffset);
 
-    // 如果是特殊时间点，加一句自然提示
-    if (hour >= 6 && hour < 9) {
-        context += QStringLiteral(" 早上好，请用带着朝气的语气打招呼。");
-    } else if (hour >= 12 && hour < 14) {
-        context += QStringLiteral(" 中午了，可以问问主人吃饭了没。");
-    } else if (hour >= 21 || hour < 5) {
-        context += QStringLiteral(" 时间不早了，可以关心主人早点休息。");
+    // 天气上下文（由 WeatherManager 构建，含地区/天气/过期标记）
+    if (!m_weatherContext.isEmpty()) {
+        context += QStringLiteral("\n") + m_weatherContext;
     }
 
-    // 天气信息（如果有）
-    if (!m_weatherDesc.isEmpty()) {
-        context += QStringLiteral(" 外面天气：%1。").arg(m_weatherDesc);
-    }
+    context += QStringLiteral("\n[/当前环境信息]");
 
     return context;
 }

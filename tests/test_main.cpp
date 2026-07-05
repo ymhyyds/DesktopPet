@@ -78,25 +78,18 @@ private slots:
     void testSpacesInPath();
 };
 
-// ── Mock server helper ─────────────────────────────────────────────────────
-struct MockServer {
-    QProcess *proc = nullptr;
-    int port = 0;
+// ── Thunder From一 ──
+#include "WeatherManagerTest.h"
 
-    bool start(const QString &scriptPath);
-    void stop();
-    void setDelay(int ms);
-    void setError(int httpCode, const QString &target = QStringLiteral("both"));
-    void setResponseType(const QString &target, const QString &type);
-    void clearError();
-    QString baseUrl() const;
-};
+// ── Mock server helper ─────────────────────────────────────────────────────
+#include "MockServer.h"
 
 // ── Include all test implementations ───────────────────────────────────────
 #include "VoiceVoxClientTest.cpp"
 #include "TtsEngineTest.cpp"
 #include "EdgeTtsEngineTest.cpp"
 #include "MockServerHelper.cpp"
+#include "WeatherManagerTest.cpp"
 
 // ── Main ───────────────────────────────────────────────────────────────────
 int main(int argc, char *argv[])
@@ -135,6 +128,14 @@ int main(int argc, char *argv[])
     {
         EdgeTtsEngineTest tc;
         runSuite(QStringLiteral("EdgeTtsEngine"), tc);
+    }
+    {
+        WeatherManagerTest tc;
+        runSuite(QStringLiteral("WeatherManager"), tc);
+    }
+    {
+        PromptManagerWeatherTest tc;
+        runSuite(QStringLiteral("PromptManager-Weather"), tc);
     }
 
     qDebug() << "==========================================";

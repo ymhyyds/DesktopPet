@@ -10,11 +10,15 @@ find_package(Qt6 REQUIRED COMPONENTS Test Core Network Multimedia Widgets)
 set(TESTED_SOURCES
     ${CMAKE_SOURCE_DIR}/ai/VoiceVoxClient.cpp
     ${CMAKE_SOURCE_DIR}/ai/TtsEngine.cpp
+    ${CMAKE_SOURCE_DIR}/ai/PromptManager.cpp
+    ${CMAKE_SOURCE_DIR}/core/WeatherManager.cpp
 )
 
 # Only test_main.cpp — it #includes the other .cpp files internally
 set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test_main.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/WeatherManagerTest.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/MockServer.h
 )
 
 add_executable(test_tts ${TEST_SOURCES} ${TESTED_SOURCES})
@@ -57,6 +61,12 @@ configure_file(
     COPYONLY
 )
 
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/MockWeatherServer.py
+    ${CMAKE_CURRENT_BINARY_DIR}/MockWeatherServer.py
+    COPYONLY
+)
+
 # Also copy mock scripts to the executable output directory so they're
 # available when running test_tts.exe directly (not via ctest).
 add_custom_command(TARGET test_tts POST_BUILD
@@ -69,6 +79,9 @@ add_custom_command(TARGET test_tts POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/MockVoiceVoxServer.py"
         "$<TARGET_FILE_DIR:test_tts>/MockVoiceVoxServer.py"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/MockWeatherServer.py"
+        "$<TARGET_FILE_DIR:test_tts>/MockWeatherServer.py"
 )
 
 add_test(NAME test_tts

@@ -19,6 +19,7 @@
 #include "../settings/SettingsWindow.h"
 #include "../settings/ParameterWindow.h"
 #include "../settings/CropDialog.h"
+#include "WeatherManager.h"
 #include "GlobalHotkeyManager.h"
 
 #include <QApplication>
@@ -51,29 +52,6 @@ App::App(QObject *parent)
 }
 
 App::~App() = default;
-
-void App::fetchWeather()
-{
-    auto *net = new QNetworkAccessManager(this);
-    QNetworkRequest req{QUrl(QStringLiteral("https://wttr.in?format=%C+%t&lang=zh"))};
-    req.setRawHeader("User-Agent", "curl/8.0");
-    QNetworkReply *reply = net->get(req);
-
-    connect(reply, &QNetworkReply::finished, this, [this, reply, net]() {
-        if (reply->error() == QNetworkReply::NoError) {
-            const QString weather = QString::fromUtf8(reply->readAll()).trimmed();
-            if (!weather.isEmpty()) {
-                m_weatherDescription = weather;
-                m_promptManager->setWeatherDescription(weather);
-                qInfo() << "[App] 获取到天气信息：" << weather;
-            }
-        } else {
-            qDebug() << "[App] 获取天气失败：" << reply->errorString();
-        }
-        reply->deleteLater();
-        net->deleteLater();
-    });
-}
 
 // ---------------------------------------------------------------------------
 // 深夜就寝提醒：0:00~6:00 间每隔 5 分钟检查一次，
@@ -221,6 +199,7 @@ bool App::initialize()
     m_emotionAnalyzer = std::make_unique<EmotionAnalyzer>();
     m_aiClient        = std::make_unique<DeepSeekClient>();
     m_ttsEngine       = std::make_unique<TtsEngine>();
+    m_weatherManager   = std::make_unique<WeatherManager>(this);
 
     // ---------------------------------------------------------------
     // 4. 窗口管理器 + 桌宠窗口（纯 Live2D 模式）
@@ -395,8 +374,8 @@ bool App::initialize()
             m_petWindow->setSpeechBubbleTextColor(QColor(textColor));
     }
 
-    // 异步获取天气
-    fetchWeather();
+    // 异步获取天气（使用 WeatherManager），启动 30 分钟自动刷新
+    m_weatherManager->startAutoRefresh();
 
     // 深夜就寝提醒
     setupBedtimeReminder();
@@ -429,6 +408,18 @@ void App::setupConnections()
                     m_aiBusy = true;
                     m_aiClient->sendMessage(prompt, history);
                 }
+            });
+
+    // --- 天气管理器 ---
+    connect(m_weatherManager.get(), &WeatherManager::weatherUpdated,
+            this, [this]() {
+                m_promptManager->setWeatherContext(m_weatherManager->buildWeatherContext());
+                qInfo() << "[App] 天气信息已更新";
+            });
+    connect(m_weatherManager.get(), &WeatherManager::weatherFetchFailed,
+            this, [this]() {
+                // 不出错误框、不阻塞 AI、天气文本沿用上一次有效缓存
+                qDebug() << "[App] 天气获取失败（已保留上一次缓存）";
             });
 
     // --- 聊天窗口 → AI 客户端 ---

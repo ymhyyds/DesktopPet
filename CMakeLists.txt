@@ -41,6 +41,8 @@ set(CORE_SOURCES
     core/App.h
     core/GlobalHotkeyManager.cpp
     core/GlobalHotkeyManager.h
+    core/WeatherManager.cpp
+    core/WeatherManager.h
     core/WindowManager.cpp
     core/WindowManager.h
 )
