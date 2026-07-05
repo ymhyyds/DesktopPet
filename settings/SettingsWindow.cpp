@@ -80,6 +80,54 @@ void SettingsWindow::setupUi()
     voiceRow->addWidget(m_voiceComboBox);
     voiceRow->addStretch();
 
+    // ── Edge TTS 特有设置（后端=Edge 时可见） ──
+    m_edgeExecPathEdit = new QLineEdit(this);
+    m_edgeExecPathEdit->setPlaceholderText(QStringLiteral("留空则自动检测"));
+    m_edgeBrowseBtn = new QPushButton(QStringLiteral("浏览..."), this);
+    auto *edgePathRow = new QHBoxLayout();
+    edgePathRow->addWidget(m_edgeExecPathEdit, 1);
+    edgePathRow->addWidget(m_edgeBrowseBtn);
+
+    m_edgeDetectionLabel = new QLabel(this);
+    m_edgeDetectionLabel->setStyleSheet(QStringLiteral("font-size: 11px; color: #888;"));
+    m_edgeDetectionLabel->setWordWrap(true);
+
+    m_edgeRateSpinBox = new QSpinBox(this);
+    m_edgeRateSpinBox->setRange(-100, 100);
+    m_edgeRateSpinBox->setValue(5);
+    m_edgeRateSpinBox->setSuffix(QStringLiteral("%"));
+
+    m_edgeVolumeSpinBox = new QSpinBox(this);
+    m_edgeVolumeSpinBox->setRange(-100, 100);
+    m_edgeVolumeSpinBox->setValue(0);
+    m_edgeVolumeSpinBox->setSuffix(QStringLiteral("%"));
+
+    m_edgePitchSpinBox = new QSpinBox(this);
+    m_edgePitchSpinBox->setRange(-100, 100);
+    m_edgePitchSpinBox->setValue(15);
+    m_edgePitchSpinBox->setSuffix(QStringLiteral("Hz"));
+
+    // 测试语音按钮行
+    auto *edgeTestRow = new QHBoxLayout();
+    m_edgeTestBtn = new QPushButton(QStringLiteral("测试语音"), this);
+    m_edgeTestBtn->setEnabled(false);
+    m_edgeTestStatusLabel = new QLabel(QStringLiteral("就绪"), this);
+    m_edgeTestStatusLabel->setStyleSheet(QStringLiteral("font-size: 11px;"));
+    edgeTestRow->addWidget(m_edgeTestBtn);
+    edgeTestRow->addWidget(m_edgeTestStatusLabel);
+    edgeTestRow->addStretch();
+
+    connect(m_edgeBrowseBtn, &QPushButton::clicked, this, &SettingsWindow::onEdgeBrowseClicked);
+    connect(m_edgeTestBtn, &QPushButton::clicked, this, &SettingsWindow::onEdgeTestSpeechClicked);
+
+    // 插入 Edge TTS 表单项（语音选择行 98 之后，VoiceVox 行之前）
+    formLayout->addRow(QStringLiteral("可执行文件路径："), edgePathRow);
+    formLayout->addRow(m_edgeDetectionLabel);
+    formLayout->addRow(QStringLiteral("语速："), m_edgeRateSpinBox);
+    formLayout->addRow(QStringLiteral("音量："), m_edgeVolumeSpinBox);
+    formLayout->addRow(QStringLiteral("音高："), m_edgePitchSpinBox);
+    formLayout->addRow(edgeTestRow);
+
     m_vvUrlLabel = new QLabel(QStringLiteral("VoiceVox 地址："), this);
     m_vvUrlEdit = new QLineEdit(this);
     m_vvUrlEdit->setText(QStringLiteral("http://127.0.0.1:50021"));
@@ -237,22 +285,64 @@ void SettingsWindow::setupUi()
 
     setMinimumSize(320, 300);
 
-    updateVoiceVoxVisibility();
+    updateBackendVisibility();
 }
 
-void SettingsWindow::updateVoiceVoxVisibility()
+void SettingsWindow::updateBackendVisibility()
 {
     const bool isVv = (m_backendCombo->currentData().toInt() == 1);
+    const bool isEdge = !isVv;
+
+    // VoiceVox 控件
     m_vvUrlLabel->setVisible(isVv);
     m_vvUrlEdit->setVisible(isVv);
     m_vvStatusLabel->setVisible(isVv);
+
+    // Edge TTS 控件
+    m_edgeExecPathEdit->setVisible(isEdge);
+    m_edgeBrowseBtn->setVisible(isEdge);
+    m_edgeDetectionLabel->setVisible(isEdge);
+    m_edgeRateSpinBox->setVisible(isEdge);
+    m_edgeVolumeSpinBox->setVisible(isEdge);
+    m_edgePitchSpinBox->setVisible(isEdge);
+    m_edgeTestBtn->setVisible(isEdge);
+    m_edgeTestStatusLabel->setVisible(isEdge);
 }
 
 void SettingsWindow::onBackendChanged(int)
 {
-    updateVoiceVoxVisibility();
+    const bool isEdge = (m_backendCombo->currentData().toInt() == 0);
+    updateBackendVisibility();
     m_voiceComboBox->clear();
-    m_voiceComboBox->addItem(QStringLiteral("（切换后端后请保存以加载语音）"), QString());
+    m_voiceComboBox->setEditable(isEdge);
+
+    if (isEdge) {
+        // Edge: editable combo, pre-populate common Chinese voices
+        const QStringList commonVoices = {
+            QStringLiteral("zh-CN-XiaoxiaoNeural"),
+            QStringLiteral("zh-CN-XiaoyiNeural"),
+            QStringLiteral("zh-CN-YunjianNeural"),
+            QStringLiteral("zh-CN-YunxiNeural"),
+            QStringLiteral("zh-CN-YunyangNeural"),
+            QStringLiteral("zh-CN-XiaochenNeural"),
+            QStringLiteral("zh-CN-XiaohanNeural"),
+            QStringLiteral("zh-CN-XiaomengNeural"),
+            QStringLiteral("zh-CN-XiaomoNeural"),
+            QStringLiteral("zh-CN-XiaoruiNeural"),
+            QStringLiteral("zh-CN-XiaoshuangNeural"),
+            QStringLiteral("zh-CN-XiaoxuanNeural"),
+            QStringLiteral("zh-CN-XiaoyanNeural"),
+            QStringLiteral("zh-CN-XiaozhenNeural"),
+        };
+        m_voiceComboBox->addItems(commonVoices);
+        m_voiceComboBox->setCurrentText(m_edgeVoice);
+        // 启用测试按钮，恢复就绪状态
+        m_edgeTestBtn->setEnabled(true);
+        m_edgeTestStatusLabel->setText(QStringLiteral("就绪"));
+    } else {
+        // VoiceVox: selection combo, show placeholder
+        m_voiceComboBox->addItem(QStringLiteral("（切换后端后请保存以加载语音）"), QString());
+    }
 }
 
 void SettingsWindow::onSaveClicked()
@@ -267,18 +357,35 @@ void SettingsWindow::onSaveClicked()
     emit headTrackingToggled(m_headTrackingCheckBox->isChecked());
     emit ttsToggled(m_ttsCheckBox->isChecked());
     emit keepOnTopToggled(m_keepOnTopCheckBox->isChecked());
-    emit ttsBackendChanged(m_backendCombo->currentData().toInt());
 
-    if (m_voiceComboBox->currentIndex() >= 0) {
-        const QString voice = m_voiceComboBox->currentData().toString();
+    const int backend = m_backendCombo->currentData().toInt();
+    emit ttsBackendChanged(backend);
+
+    if (backend == 0) {
+        // Edge TTS 设置
+        const QString execPath = m_edgeExecPathEdit->text().trimmed();
+        emit edgeExecutablePathChanged(execPath);
+
+        const QString voice = m_voiceComboBox->currentText().trimmed();
         if (!voice.isEmpty()) {
-            emit ttsVoiceChanged(voice);
+            m_edgeVoice = voice;
+            emit edgeVoiceChanged(voice);
         }
-    }
-
-    const QString vvUrl = m_vvUrlEdit->text().trimmed();
-    if (!vvUrl.isEmpty()) {
-        emit voiceVoxUrlChanged(vvUrl);
+        emit edgeRateChanged(m_edgeRateSpinBox->value());
+        emit edgeVolumeChanged(m_edgeVolumeSpinBox->value());
+        emit edgePitchChanged(m_edgePitchSpinBox->value());
+    } else {
+        // VoiceVox 设置
+        if (m_voiceComboBox->currentIndex() >= 0) {
+            const QString voice = m_voiceComboBox->currentData().toString();
+            if (!voice.isEmpty()) {
+                emit ttsVoiceChanged(voice);
+            }
+        }
+        const QString vvUrl = m_vvUrlEdit->text().trimmed();
+        if (!vvUrl.isEmpty()) {
+            emit voiceVoxUrlChanged(vvUrl);
+        }
     }
 
     emit snapThresholdChanged(m_snapThresholdSpinBox->value());
@@ -317,11 +424,14 @@ void SettingsWindow::setTtsBackend(int backend)
             break;
         }
     }
-    updateVoiceVoxVisibility();
+    updateBackendVisibility();
 }
 
 void SettingsWindow::setAvailableVoices(const QStringList &voices, const QString &currentVoice)
 {
+    // 如果当前后端是 Edge TTS，VoiceVox 的语音列表不应覆盖 Edge 的选择
+    if (m_backendCombo->currentData().toInt() == 0) return;
+
     m_voiceComboBox->clear();
 
     if (voices.isEmpty()) {
@@ -413,6 +523,52 @@ void SettingsWindow::setChatCropButtonEnabled(bool enabled)
 void SettingsWindow::setScreenshotPath(const QString &path)
 {
     m_screenshotPathEdit->setText(path);
+}
+
+// ──── Edge TTS 设置 ──────────────────────────────────────────────────────────
+
+void SettingsWindow::setEdgeExecutablePath(const QString &path)
+{
+    m_edgeExecPathEdit->setText(path);
+}
+
+void SettingsWindow::setEdgeVoice(const QString &voice)
+{
+    m_edgeVoice = voice;
+    // 如果当前后端是 Edge，更新可编辑组合框的文本
+    if (m_backendCombo->currentData().toInt() == 0) {
+        m_voiceComboBox->setCurrentText(voice);
+    }
+}
+
+void SettingsWindow::setEdgeRatePercent(int percent)
+{
+    m_edgeRateSpinBox->setValue(percent);
+}
+
+void SettingsWindow::setEdgeVolumePercent(int percent)
+{
+    m_edgeVolumeSpinBox->setValue(percent);
+}
+
+void SettingsWindow::setEdgePitchHz(int hz)
+{
+    m_edgePitchSpinBox->setValue(hz);
+}
+
+void SettingsWindow::setEdgeDetectionText(const QString &text)
+{
+    m_edgeDetectionLabel->setText(text);
+}
+
+void SettingsWindow::setEdgeTestEnabled(bool enabled)
+{
+    m_edgeTestBtn->setEnabled(enabled);
+}
+
+void SettingsWindow::setEdgeTestStatusText(const QString &text)
+{
+    m_edgeTestStatusLabel->setText(text);
 }
 
 void SettingsWindow::onChatBackgroundBrowseClicked()
@@ -524,6 +680,31 @@ void SettingsWindow::setBubbleTextColor(const QColor &color)
             "QPushButton:hover { border-color: #333; }"
         ).arg(color.name()));
     }
+}
+
+// ──── Edge TTS 浏览可执行文件 ────────────────────────────────────────────────
+
+void SettingsWindow::onEdgeBrowseClicked()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this,
+        QStringLiteral("选择 Edge TTS 可执行文件"),
+        QString(),
+        QStringLiteral("可执行文件 (*.exe);;所有文件 (*.*)")
+    );
+    if (path.isEmpty()) return;
+    m_edgeExecPathEdit->setText(path);
+}
+
+// ──── Edge TTS 测试语音 ──────────────────────────────────────────────────────
+
+void SettingsWindow::onEdgeTestSpeechClicked()
+{
+    // 禁用按钮，防止重复点击
+    m_edgeTestBtn->setEnabled(false);
+    m_edgeTestStatusLabel->setText(QStringLiteral("合成中..."));
+
+    emit edgeTestSpeechRequested(QStringLiteral("这是一次语音测试喵~"));
 }
 
 void SettingsWindow::closeEvent(QCloseEvent *event)

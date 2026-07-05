@@ -30,6 +30,7 @@ TtsEngine::TtsEngine(QObject *parent)
                 m_mediaPlayer->stop();
                 m_mediaPlayer->setSource(QUrl());
                 cleanupTempFiles();
+                emit playbackFinished(static_cast<int>(m_backend));
             } else if (status == QMediaPlayer::InvalidMedia) {
                 qWarning() << "[TtsEngine] 无效媒体文件";
                 emit errorOccurred(static_cast<int>(m_backend),

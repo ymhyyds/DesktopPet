@@ -81,6 +81,8 @@ signals:
     void VoiceVoxSpeakersReady();
     void statusChanged(int backend, const QString &statusText);
     void errorOccurred(int backend, const QString &reason);
+    /// 正常播放结束（对端是 VoiceVox / Edge TTS 播放的音频自然播完）
+    void playbackFinished(int backend);
 
 private:
     void stopPlayer();

@@ -547,8 +547,9 @@ void App::setupConnections()
                 openSettingsWindow();
             });
 
-    // ★ SettingsWindow 关闭 → 清理 auxiliaryHost
+    // ★ SettingsWindow 关闭 → 清理 auxiliaryHost + 测试语音状态
     connect(m_settingsWindow.get(), &SettingsWindow::closed, this, [this]() {
+        m_testSpeechInProgress = false;
 #ifdef Q_OS_WIN
         m_auxiliaryHostForSettings = nullptr;
 #endif
@@ -749,6 +750,7 @@ void App::setupConnections()
     connect(m_settingsWindow.get(), &SettingsWindow::ttsBackendChanged,
             this, [this](int backend) {
                 if (!m_ttsEngine) return;
+                m_testSpeechInProgress = false;
                 const auto be = static_cast<TtsEngine::Backend>(backend);
                 m_ttsEngine->setBackend(be);
 
@@ -775,6 +777,96 @@ void App::setupConnections()
                     m_settingsWindow->setAvailableVoices(
                         m_ttsEngine->availableVoices(), m_ttsEngine->voice());
                 }
+            });
+
+    // ★ 设置 → Edge TTS 配置
+    connect(m_settingsWindow.get(), &SettingsWindow::edgeExecutablePathChanged,
+            this, [this](const QString &path) {
+                if (!m_ttsEngine) return;
+                m_ttsEngine->setEdgeExecutablePath(path);
+                if (!m_settingsWindow) return;
+                // 更新检测状态
+                const QString resolved = m_ttsEngine->resolveEdgeExecutable();
+                if (resolved.isEmpty()) {
+                    m_settingsWindow->setEdgeDetectionText(
+                        QStringLiteral("未检测到 edge-tts 可执行文件"));
+                } else {
+                    m_settingsWindow->setEdgeDetectionText(
+                        QStringLiteral("已解析到: %1").arg(resolved));
+                }
+            });
+
+    connect(m_settingsWindow.get(), &SettingsWindow::edgeVoiceChanged,
+            this, [this](const QString &voice) {
+                if (m_ttsEngine) {
+                    m_ttsEngine->setEdgeVoice(voice);
+                }
+            });
+
+    connect(m_settingsWindow.get(), &SettingsWindow::edgeRateChanged,
+            this, [this](int percent) {
+                if (m_ttsEngine) {
+                    m_ttsEngine->setEdgeRatePercent(percent);
+                }
+            });
+
+    connect(m_settingsWindow.get(), &SettingsWindow::edgeVolumeChanged,
+            this, [this](int percent) {
+                if (m_ttsEngine) {
+                    m_ttsEngine->setEdgeVolumePercent(percent);
+                }
+            });
+
+    connect(m_settingsWindow.get(), &SettingsWindow::edgePitchChanged,
+            this, [this](int hz) {
+                if (m_ttsEngine) {
+                    m_ttsEngine->setEdgePitchHz(hz);
+                }
+            });
+
+    // ★ 设置 → Edge TTS 测试语音
+    connect(m_settingsWindow.get(), &SettingsWindow::edgeTestSpeechRequested,
+            this, [this](const QString &text) {
+                if (!m_ttsEngine || !m_ttsEngine->isEnabled()) {
+                    if (m_settingsWindow) {
+                        m_settingsWindow->setEdgeTestEnabled(true);
+                        m_settingsWindow->setEdgeTestStatusText(QStringLiteral("TTS 已禁用"));
+                    }
+                    return;
+                }
+                m_testSpeechInProgress = true;
+                m_ttsEngine->speak(text);
+            });
+
+    // ★ TtsEngine 状态 → 测试语音反馈
+    connect(m_ttsEngine.get(), &TtsEngine::statusChanged,
+            this, [this](int backend, const QString &statusText) {
+                if (!m_testSpeechInProgress || !m_settingsWindow) return;
+                if (backend != static_cast<int>(TtsEngine::EdgeTts)) return;
+                if (statusText.contains(QStringLiteral("播放中"))) {
+                    m_settingsWindow->setEdgeTestStatusText(QStringLiteral("播放中..."));
+                }
+            });
+
+    // ★ TtsEngine 错误 → 测试语音错误反馈
+    connect(m_ttsEngine.get(), &TtsEngine::errorOccurred,
+            this, [this](int backend, const QString &reason) {
+                if (!m_testSpeechInProgress || !m_settingsWindow) return;
+                if (backend != static_cast<int>(TtsEngine::EdgeTts)) return;
+                m_testSpeechInProgress = false;
+                m_settingsWindow->setEdgeTestEnabled(true);
+                m_settingsWindow->setEdgeTestStatusText(
+                    QStringLiteral("错误: %1").arg(reason));
+            });
+
+    // ★ TtsEngine 播放完毕 → 测试语音恢复
+    connect(m_ttsEngine.get(), &TtsEngine::playbackFinished,
+            this, [this](int backend) {
+                if (!m_testSpeechInProgress || !m_settingsWindow) return;
+                if (backend != static_cast<int>(TtsEngine::EdgeTts)) return;
+                m_testSpeechInProgress = false;
+                m_settingsWindow->setEdgeTestEnabled(true);
+                m_settingsWindow->setEdgeTestStatusText(QStringLiteral("就绪"));
             });
 
 
@@ -991,15 +1083,35 @@ void App::openSettingsWindow()
 
     if (m_ttsEngine) {
         m_settingsWindow->setTtsBackend(static_cast<int>(m_ttsEngine->backend()));
-        m_settingsWindow->setAvailableVoices(
-            m_ttsEngine->availableVoices(), m_ttsEngine->voice());
         m_settingsWindow->setVoiceVoxUrl(m_ttsEngine->voiceVoxUrl());
 
-        // 如果是 VoiceVox 后端且说话人还没缓存，触发拉取
-        if (m_ttsEngine->backend() == TtsEngine::VoiceVox
-            && m_ttsEngine->availableVoices().isEmpty()) {
-            m_settingsWindow->setVoiceVoxLoading(true);
-            m_ttsEngine->refreshVoices();
+        if (m_ttsEngine->backend() == TtsEngine::VoiceVox) {
+            m_settingsWindow->setAvailableVoices(
+                m_ttsEngine->availableVoices(), m_ttsEngine->voice());
+
+            // 如果是 VoiceVox 后端且说话人还没缓存，触发拉取
+            if (m_ttsEngine->availableVoices().isEmpty()) {
+                m_settingsWindow->setVoiceVoxLoading(true);
+                m_ttsEngine->refreshVoices();
+            }
+        } else {
+            // Edge TTS: 填充设置值
+            m_settingsWindow->setEdgeExecutablePath(m_ttsEngine->edgeExecutablePath());
+            m_settingsWindow->setEdgeVoice(m_ttsEngine->edgeVoice());
+            m_settingsWindow->setEdgeRatePercent(m_ttsEngine->edgeRatePercent());
+            m_settingsWindow->setEdgeVolumePercent(m_ttsEngine->edgeVolumePercent());
+            m_settingsWindow->setEdgePitchHz(m_ttsEngine->edgePitchHz());
+
+            // 显示插件检测状态
+            const QString resolved = m_ttsEngine->resolveEdgeExecutable();
+            if (resolved.isEmpty()) {
+                m_settingsWindow->setEdgeDetectionText(
+                    QStringLiteral("未检测到 edge-tts 可执行文件"));
+            } else {
+                m_settingsWindow->setEdgeDetectionText(
+                    QStringLiteral("已解析到: %1").arg(resolved));
+            }
+            m_settingsWindow->setEdgeTestEnabled(true);
         }
     }
 

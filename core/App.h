@@ -162,4 +162,7 @@ private:
 
     // --- AI 请求繁忙标志（防止挂机主动请求覆盖流式 buffer） ---
     bool m_aiBusy = false;
+
+    // --- Edge TTS 测试语音状态 ────
+    bool m_testSpeechInProgress = false;
 };

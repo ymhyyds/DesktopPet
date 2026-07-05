@@ -11,6 +11,7 @@ class QSpinBox;
 class QSlider;
 class QLabel;
 class QPushButton;
+class QSpinBox;
 class Live2DView;
 
 /**
@@ -39,6 +40,16 @@ public:
     void setVoiceVoxUrl(const QString &url);
     void setVoiceVoxLoading(bool loading);
 
+    /// Edge TTS 设置
+    void setEdgeExecutablePath(const QString &path);
+    void setEdgeVoice(const QString &voice);
+    void setEdgeRatePercent(int percent);
+    void setEdgeVolumePercent(int percent);
+    void setEdgePitchHz(int hz);
+    void setEdgeDetectionText(const QString &text);
+    void setEdgeTestEnabled(bool enabled);
+    void setEdgeTestStatusText(const QString &text);
+
     /// 🎨 设置说话气泡颜色预览
     void setBubbleBgColor(const QColor &color);
     void setBubbleBorderColor(const QColor &color);
@@ -65,6 +76,15 @@ signals:
     void chatBackgroundCropRequested(const QString &currentPath);
     void screenshotPathChanged(const QString &path);
 
+    /// Edge TTS 保存
+    void edgeExecutablePathChanged(const QString &path);
+    void edgeVoiceChanged(const QString &voiceName);
+    void edgeRateChanged(int percent);
+    void edgeVolumeChanged(int percent);
+    void edgePitchChanged(int hz);
+    /// 点击"测试语音"按钮
+    void edgeTestSpeechRequested(const QString &text);
+
     /// 🎨 说话气泡颜色
     void bubbleBgColorChanged(const QColor &color);
     void bubbleBorderColorChanged(const QColor &color);
@@ -83,10 +103,12 @@ private slots:
     void onBubbleBgColorClicked();
     void onBubbleBorderColorClicked();
     void onBubbleTextColorClicked();
+    void onEdgeBrowseClicked();
+    void onEdgeTestSpeechClicked();
 
 private:
     void setupUi();
-    void updateVoiceVoxVisibility();
+    void updateBackendVisibility();
 
 private:
     QLineEdit *m_apiKeyEdit = nullptr;
@@ -122,4 +144,15 @@ private:
     QColor m_bubbleBgColor     = QColor(255, 255, 255);
     QColor m_bubbleBorderColor = QColor(200, 200, 200);
     QColor m_bubbleTextColor   = QColor(60, 60, 60);
+
+    // ──── Edge TTS ────
+    QLineEdit   *m_edgeExecPathEdit  = nullptr;
+    QPushButton *m_edgeBrowseBtn     = nullptr;
+    QSpinBox    *m_edgeRateSpinBox   = nullptr;
+    QSpinBox    *m_edgeVolumeSpinBox = nullptr;
+    QSpinBox    *m_edgePitchSpinBox  = nullptr;
+    QLabel      *m_edgeDetectionLabel = nullptr;
+    QPushButton *m_edgeTestBtn       = nullptr;
+    QLabel      *m_edgeTestStatusLabel = nullptr;
+    QString      m_edgeVoice = QStringLiteral("zh-CN-XiaoyiNeural");
 };
