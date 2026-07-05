@@ -1,12 +1,12 @@
 # DesktopPet 项目上下文
 
-> 最后更新: 2026-07-05 (时间/天气感知 验证进行中 — 分支 fix/time-weather-awareness-hardening)
-> 当前分支: fix/time-weather-awareness-hardening（未提交）
+> 最后更新: 2026-07-05 (时间/天气感知 已完成 — 分支 fix/time-weather-awareness-hardening)
+> 当前分支: fix/time-weather-awareness-hardening（已提交）
 > 阶段1 完成度: 代码 100%, 单元测试 100% (19/19)
 > 阶段2 完成度: 代码 100%, 单元测试 100% (35/35), CMake/mock/测试修复全部完成
 > 阶段2 提交: 24dfae8 feat: add Edge TTS CLI backend and tests
 > 阶段2 标签: checkpoint-edge-tts-phase2
-> 天气/时间硬化: 代码完成; 预提交验证发现 test_tts 崩溃（WeatherManagerTest::testTimeout 中 onTimeout() 在 QNetworkReply::abort() → 同步触发 onReplyFinished 置 null 后再次 deleteLater 导致段错误）
+> 天气/时间硬化: 已完成; 提交 0967606 feat + a8318eb docs; 标签 checkpoint-weather-awareness; 63/63 测试 PASS; 真实联网 smoke test PASS
 > 项目路径: `C:\Users\余敏涵\Desktop\DesktopPet`
 
 ---
@@ -2832,7 +2832,8 @@ else                    → Hidden（双窗口同步隐藏）
 ### 分支
 
 ```
-fix/time-weather-awareness-hardening（从 feature/edge-tts-voicevox-only 创建，未提交）
+fix/time-weather-awareness-hardening（从 feature/edge-tts-voicevox-only 创建，已提交并推送）
+提交 0967606 feat + a8318eb docs；标签 checkpoint-weather-awareness
 ```
 
 ### 已完成
@@ -2863,12 +2864,14 @@ fix/time-weather-awareness-hardening（从 feature/edge-tts-voicevox-only 创建
 | **PromptManager 天气集成测试（7 项）** — 含天气/不含天气/禁用时间感知/contextHistory 注入/挂机注入/不污染历史/清除天气 | `tests/WeatherManagerTest.cpp` |
 | **CMake 构建系统** — WeatherManager 加入 CORE_SOURCES，测试加入 test_tts target | `CMakeLists.txt` + `tests/CMakeLists.txt` |
 
-### 尚未完成 / 预提交验证状态
+### 提交与验证状态
 
 1. ~~自动定时刷新~~ — 已实现 `WeatherManager::startAutoRefresh()`，`stopAutoRefresh()`，含 QTimer + m_requestPending 防并发 + 析构清理。
-2. ~~Release 构建~~ — `cmake --build build --config Release` 测试 target (test_tts) 成功，主 exe 因 DesktopPet.exe 运行中链接失败。
-3. **CTest** — 未执行（当前阶段跳过）。
-4. **test_tts 验证** — ❌ 崩溃。
+2. ~~Release 构建~~ — cmake --build build --config Release 成功。
+3. ~~CTest~~ — 1/1 test PASS（45.3s）。
+4. ~~test_tts 63/63 PASS~~ — 全部 5 套件通过。
+5. ~~真实联网 smoke test~~ — ✅ 详见下方记录。
+6. ~~已提交并推送~~ — 0967606 feat + a8318eb docs；标签 checkpoint-weather-awareness。
 
 #### test_tts 崩溃诊断
 
@@ -2901,57 +2904,86 @@ void WeatherManager::onTimeout()
 | `testFailureWithStaleCache` 和 `testAutoRefreshFailureKeepsStaleCache` 缓存不过期 | `setCacheDuration` 在请求之后调用，不影响已设置的 m_cacheExpiry | ✅ 已修复（移动 `setCacheDuration` 到 `requestWeather` 之前） |
 | `testDestructorNoTimerCallback` 信号标志不重置 | `signalAfterDestroy` 在析构前的合法更新中被置 true 后未重置 | ✅ 已修复 |
 
-### 当前修改文件
+### 已提交文件（提交 0967606）
 
-
-**已修改（8 个）：**
 ```
 M CMakeLists.txt              # +WeatherManager 源文件
-M PROJECT_CONTEXT.md          # 本文档，持续更新
 M ai/PromptManager.cpp        # +UTC偏移 +新格式 buildEnvironmentContext
 M ai/PromptManager.h          # setWeatherDescription→setWeatherContext
 M core/App.cpp                # -旧fetchWeather +WeatherManager 连接
 M core/App.h                  # +m_weatherManager 前置声明和成员
+A core/WeatherManager.cpp     # 315 行 WeatherManager 全实现
+A core/WeatherManager.h       # 103 行类声明（含 QTimer 自动刷新）
 M tests/CMakeLists.txt        # +WeatherManager 测试源和 mock 服务器
+A tests/MockServer.h          # MockServer 结构体提取为独立头文件
+A tests/MockWeatherServer.py  # Python mock wttr.in 服务器
+A tests/WeatherManagerTest.cpp# 575 行测试（19 项）
+A tests/WeatherManagerTest.h  # 73 行测试类声明
 M tests/test_main.cpp         # +WeatherManagerTest +PromptManagerWeatherTest
+13 files changed, 1331 insertions(+), 83 deletions(-)
 ```
 
-**新增（6 个）：**
-```
-?? core/WeatherManager.cpp    # WeatherManager 全实现
-?? core/WeatherManager.h      # 类声明（含 QTimer 自动刷新）
-?? tests/MockServer.h         # MockServer 结构体提取为独立头文件
-?? tests/MockWeatherServer.py # Python mock wttr.in 服务器
-?? tests/WeatherManagerTest.cpp   # 12 项 WeatherManager 测试 + 7 项 PromptManager 天气测试
-?? tests/WeatherManagerTest.h     # 测试类声明（头文件以支持 AUTOMOC）
-```
-
-**总计：14 个文件，0 已暂存。**
-
-**新增（4 个）：**
-```
-A core/WeatherManager.h       # 天气管理器声明
-A core/WeatherManager.cpp     # 280 行实现
-A tests/MockWeatherServer.py  # mock wttr.in j1 HTTP server
-A tests/WeatherManagerTest.cpp# 19 项测试
-```
-
-### 已知风险 / 编译状态
+### 已知风险
 
 | 项目 | 状态 |
 |------|------|
-| cmake 工具 | ❌ 当前环境无 MSVC/cmake，未编译 |
-| 语法正确性 | ✅ 已逐行审查，包括信号/槽签名、JSON 解析、边界条件、缓存逻辑 |
-| CRLF 行尾 | ⚠️ 新文件使用 LF，Git checkout 时自动转换，不影响编译 |
-| setTransferTimeout | ✅ 需要 Qt 5.15+（项目使用 Qt 6.11.1） |
-| QTest::qSleep | ✅ 测试中用于等待缓存过期，不影响事件循环 |
-| MockServer 端口冲突 | ✅ 绑定 127.0.0.1:0（OS 分配端口），各套件独立 start/stop |
+| wttr.in 频率限制 | ⚠️ 连续两次启动 (间隔 <30s) 可能被拒接；正常使用（每次开机启动一次，30 分钟自动刷新间隔）不会触发 |
+| weatherDesc 语言 | wttr.in `Accept-Language` 不保证返回中文，实际返回英文 "Partly cloudy"；不影响 json 解析和语义 |
+| 地区推断 | wttr.in 根据公网 IP 推断地区，返回 `nearest_area` 的 `areaName`；不精确，仅用于"大致地区"提示 |
+| 跨进程缓存 | ❌ 未实现；每次 WeatherManager 构造都向 wttr.in 发起请求（如项目重启） |
+| AI 回答验证 | ⚠️ 真实 AI 聊天中环境信息是否正确注入尚未人工验证；仅由单元测试覆盖 |
 
-### 下一窗口从 WeatherManager 自动刷新继续
+### 后续工作（可选）
 
-建议后续工作：
-1. 在正确环境中编译并通过全部测试
-2. 添加 `WeatherManager::startAutoRefresh()` — 每 30 分钟定时调用 `requestWeather()`
-3. 在 `App::initialize()` 中调用 `m_weatherManager->startAutoRefresh()`
-4. 可选：添加 SettingsWindow 开关控制天气功能
-5. 不修改 TTS、全屏、Live2D、双击、智能穿透等无关功能
+- SettingsWindow 天气功能开关
+- 跨进程缓存（重启后复用上次缓存，减少 wttr.in 请求）
+- AI 回答中环境信息的人工验收
+
+---
+
+## 天气感知真实联网 Smoke Test — 2026-07-05
+
+### 测试环境
+
+- Windows 11 Pro, MSVC 2026, Qt 6.11.1
+- Release 构建，真实网络连接，真实 wttr.in 服务
+- DeepSeek API 未在本次测试中实际发起聊天对话（GUI 自动化限制）
+
+### 请求结果
+
+```
+[WeatherManager] 开始请求天气: "https://wttr.in/?format=j1&lang=zh-cn&m"
+[WeatherManager] 天气更新成功: "25" °C "Partly cloudy" | 地区: "Hatsudai"
+[App] 天气信息已更新
+```
+
+| 字段 | 值 | 说明 |
+|------|-----|------|
+| areaName | Hatsudai | wttr.in 根据公网 IP 推断的附近地区，仅用于"大致地区"提示 |
+| temp_C | 25 | 当前温度 °C |
+| FeelsLikeC | (已解析) | 体感温度，仅在 Prompt 中拼接 |
+| humidity | (已解析) | 湿度百分比 |
+| weatherDesc | "Partly cloudy" | 英文描述，wttr.in `Accept-Language` 不保证返回中文 |
+| localObsDateTime | (已解析) | 观测时间 |
+
+### 关键观察
+
+1. **请求次数** — 启动周期仅发起 1 次请求，`m_requestPending` 防重复机制有效。
+2. **无并发请求** — 全运行周期只有一条 WeatherManager 请求日志。
+3. **断网降级** — 第二次启动时 wttr.in 返回 `Connection closed`（疑似频率限制），日志仅记录 `[WeatherManager] 天气请求失败: HTTP 0 error: "Connection closed"`，**无崩溃、无弹窗、无重试风暴**。
+4. **无残留进程** — DesktopPet.exe 关闭后，无 python 服务或子进程残留。
+5. **无临时文件** — build/Release/ 下无产出的 JSON、日志或 WAV/MP3 文件。
+6. **地区精度** — Hatsudai 仅为公网 IP 推断的大致地区，**不暴露精确坐标**，WeatherManager 只提取 `areaName` 作为"大致地区"。
+7. **同进程缓存降级** — 旧缓存保留和过期标记已在单元测试中 19/19 覆盖（testFailureWithStaleCache、testAutoRefreshFailureKeepsStaleCache 等）。
+8. **跨进程缓存** — 未实现：每次 WeatherManager 构造（重新启动应用）都会向 wttr.in 发起请求。
+9. **AI 回答** — 尚未人工验证真实聊天中 AI 是否正确包含环境信息（仅单元测试验证 PromptManager 注入格式）。
+10. **git status --short** — 无输出，工作区干净。
+
+### 与单元测试的差异
+
+| 项目 | 单元测试 | 真实联网 |
+|------|---------|---------|
+| 天气条件 | mock 返回中文"多云" | wttr.in 返回英文"Partly cloudy" |
+| 地区 | mock 返回"台北" | wttr.in 返回"Hatsudai"（IP 推断） |
+| HTTP 状态 | mock 控制返回 200/500/超时 | 真实 200 OK；第二次 Connection closed |
+| 延迟 | mock 控制 0~10s | 真实网络延迟 ~1s |
