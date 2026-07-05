@@ -201,6 +201,18 @@ bool App::initialize()
     m_ttsEngine       = std::make_unique<TtsEngine>();
     m_weatherManager   = std::make_unique<WeatherManager>(this);
 
+    // ── 从 QSettings 缓存恢复上一次天气信息（含新鲜度判断） ──
+    {
+        QSettings ws(QStringLiteral("DesktopPet"), QStringLiteral("Weather"));
+        const QString cachedCtx = ws.value(QStringLiteral("lastWeatherContext")).toString();
+        const qint64 fetchUtcMs = ws.value(QStringLiteral("lastFetchUtcMs"), 0).toLongLong();
+        if (!cachedCtx.isEmpty()) {
+            m_weatherManager->restoreFromCache(cachedCtx, fetchUtcMs);
+            m_promptManager->setWeatherContext(m_weatherManager->buildWeatherContext());
+            qInfo() << "[App] 从缓存恢复天气信息";
+        }
+    }
+
     // ---------------------------------------------------------------
     // 4. 窗口管理器 + 桌宠窗口（纯 Live2D 模式）
     // ---------------------------------------------------------------
@@ -310,6 +322,9 @@ bool App::initialize()
 
     setupConnections();
 
+    // ★ 尽早发起天气请求，让异步网络请求有更多时间完成
+    m_weatherManager->startAutoRefresh();
+
     // ──── 全屏显示设置从 QSettings 恢复 ────
     {
         QSettings ss(QStringLiteral("DesktopPet"), QStringLiteral("App"));
@@ -374,9 +389,6 @@ bool App::initialize()
             m_petWindow->setSpeechBubbleTextColor(QColor(textColor));
     }
 
-    // 异步获取天气（使用 WeatherManager），启动 30 分钟自动刷新
-    m_weatherManager->startAutoRefresh();
-
     // 深夜就寝提醒
     setupBedtimeReminder();
 
@@ -413,7 +425,12 @@ void App::setupConnections()
     // --- 天气管理器 ---
     connect(m_weatherManager.get(), &WeatherManager::weatherUpdated,
             this, [this]() {
-                m_promptManager->setWeatherContext(m_weatherManager->buildWeatherContext());
+                const QString ctx = m_weatherManager->buildWeatherContext();
+                m_promptManager->setWeatherContext(ctx);
+                // ── 缓存到 QSettings，下次启动可立即恢复 ──
+                QSettings ws(QStringLiteral("DesktopPet"), QStringLiteral("Weather"));
+                ws.setValue(QStringLiteral("lastWeatherContext"), ctx);
+                ws.setValue(QStringLiteral("lastFetchUtcMs"), m_weatherManager->lastFetchUtcMs());
                 qInfo() << "[App] 天气信息已更新";
             });
     connect(m_weatherManager.get(), &WeatherManager::weatherFetchFailed,

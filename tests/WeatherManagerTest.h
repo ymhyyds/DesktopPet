@@ -37,6 +37,14 @@ private slots:
     void testCacheExpiry();
     void testFailureWithStaleCache();
 
+    // 缓存恢复（restoreFromCache）
+    void testRestoreFromCacheFresh();
+    void testRestoreFromCacheStale();
+    void testRestoreFromCacheInvalidTimestamp();
+    void testRestoreFromCacheFutureTimestamp();
+    void testRestoreFromCacheStrippedStaleMarker();
+    void testRestoreFromCacheRefreshClearsStale();
+
     // 自动刷新
     void testAutoRefreshStartsImmediately();
     void testAutoRefreshTriggersSecondRequest();

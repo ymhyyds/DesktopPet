@@ -72,24 +72,31 @@ QString WeatherManager::buildWeatherContext() const
 
     QString text;
 
-    // 大致地区
-    if (!m_currentData.areaName.isEmpty()) {
-        text += QStringLiteral("大致地区：%1\n").arg(m_currentData.areaName);
+    // m_lastCleanContext 由 restoreFromCache() 或 onReplyFinished() 成功路径写入，
+    // 含有完整的天气描述（不含过期标记），直接使用。
+    // 若为空（极罕见路径），退化到逐字段构建。
+    if (!m_lastCleanContext.isEmpty()) {
+        text = m_lastCleanContext;
+    } else {
+        // 大致地区
+        if (!m_currentData.areaName.isEmpty()) {
+            text += QStringLiteral("大致地区：%1\n").arg(m_currentData.areaName);
+        }
+
+        // 天气条件
+        text += QStringLiteral("天气：%1，%2°C，体感 %3°C，湿度 %4%")
+            .arg(m_currentData.description,
+                 m_currentData.tempC,
+                 m_currentData.feelsLikeC,
+                 m_currentData.humidity);
+
+        // 观测时间
+        if (!m_currentData.obsDateTime.isEmpty()) {
+            text += QStringLiteral("\n天气观测时间：%1").arg(m_currentData.obsDateTime);
+        }
     }
 
-    // 天气条件
-    text += QStringLiteral("天气：%1，%2°C，体感 %3°C，湿度 %4%")
-        .arg(m_currentData.description,
-             m_currentData.tempC,
-             m_currentData.feelsLikeC,
-             m_currentData.humidity);
-
-    // 观测时间
-    if (!m_currentData.obsDateTime.isEmpty()) {
-        text += QStringLiteral("\n天气观测时间：%1").arg(m_currentData.obsDateTime);
-    }
-
-    // 数据可能已过期
+    // 数据可能已过期（动态判断，不缓存在 m_lastCleanContext 中）
     if (m_cacheExpiry.isValid() && QDateTime::currentDateTime() >= m_cacheExpiry) {
         text += QStringLiteral("\n天气数据可能已过期");
     }
@@ -129,6 +136,38 @@ void WeatherManager::stopAutoRefresh()
 {
     m_autoRefreshTimer.stop();
     cleanupRequest();
+}
+
+// ---------------------------------------------------------------------------
+// 缓存恢复（启动时从 QSettings 恢复）
+// ---------------------------------------------------------------------------
+
+void WeatherManager::restoreFromCache(const QString &weatherContext, qint64 fetchUtcMs)
+{
+    if (weatherContext.isEmpty())
+        return;
+
+    // 去除可能残留的过期标记（新鲜度由 buildWeatherContext 动态判断）
+    m_lastCleanContext = QString(weatherContext).remove(
+        QStringLiteral("\n天气数据可能已过期"));
+
+    // 设置最小有效 WeatherData，使 isValid() 返回 true
+    m_currentData.tempC       = QStringLiteral("?");
+    m_currentData.description = QStringLiteral("restored");
+
+    // 根据获取时间戳计算缓存过期时间
+    const QDateTime fetchDt = QDateTime::fromMSecsSinceEpoch(fetchUtcMs);
+    if (fetchUtcMs > 0 && fetchDt.isValid() && fetchDt <= QDateTime::currentDateTime()) {
+        m_cacheExpiry = fetchDt.addMSecs(m_cacheDurationMs);
+    } else {
+        // 非法或未来时间戳 → 立即过期
+        m_cacheExpiry = QDateTime::currentDateTime();
+    }
+
+    m_fetchTimestamp = fetchUtcMs;
+
+    qInfo() << "[WeatherManager] 从缓存恢复天气信息"
+            << (hasFreshData() ? "(新鲜)" : "(已过期)");
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +226,22 @@ void WeatherManager::onReplyFinished()
     parseResponse(body);
 
     if (m_currentData.isValid()) {
+        // ── 构建干净的天气上下文字符串（不含过期标记） ──
+        m_lastCleanContext.clear();
+        if (!m_currentData.areaName.isEmpty()) {
+            m_lastCleanContext += QStringLiteral("大致地区：%1\n").arg(m_currentData.areaName);
+        }
+        m_lastCleanContext += QStringLiteral("天气：%1，%2°C，体感 %3°C，湿度 %4%")
+            .arg(m_currentData.description,
+                 m_currentData.tempC,
+                 m_currentData.feelsLikeC,
+                 m_currentData.humidity);
+        if (!m_currentData.obsDateTime.isEmpty()) {
+            m_lastCleanContext += QStringLiteral("\n天气观测时间：%1").arg(m_currentData.obsDateTime);
+        }
+
         m_cacheExpiry = QDateTime::currentDateTime().addMSecs(m_cacheDurationMs);
+        m_fetchTimestamp = QDateTime::currentMSecsSinceEpoch();
         qInfo() << "[WeatherManager] 天气更新成功:"
                 << m_currentData.tempC << "°C"
                 << m_currentData.description

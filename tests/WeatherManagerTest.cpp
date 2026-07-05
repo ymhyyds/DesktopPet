@@ -280,6 +280,116 @@ void WeatherManagerTest::testFailureWithStaleCache()
 
 
 // ======================================================================
+// WeatherManagerTest — 缓存恢复（restoreFromCache）
+// ======================================================================
+
+void WeatherManagerTest::testRestoreFromCacheFresh()
+{
+    // 30 分钟内的缓存视为新鲜
+    const QString sample = QStringLiteral(
+        "大致地区：台北\n天气：多云，28°C，体感 32°C，湿度 89%\n天气观测时间：2026-07-05 14:30");
+    const qint64 fetchTime = QDateTime::currentMSecsSinceEpoch()
+                           - 5LL * 60 * 1000; // 5 分钟前
+
+    m_mgr->restoreFromCache(sample, fetchTime);
+    QVERIFY(m_mgr->hasFreshData());
+
+    const QString ctx = m_mgr->buildWeatherContext();
+    QVERIFY(ctx.contains(QStringLiteral("台北")));
+    QVERIFY(ctx.contains(QStringLiteral("多云")));
+    QVERIFY(ctx.contains(QStringLiteral("28")));
+    QVERIFY(ctx.contains(QStringLiteral("32")));
+    QVERIFY(ctx.contains(QStringLiteral("89")));
+    QVERIFY(!ctx.contains(QStringLiteral("过期")));
+}
+
+void WeatherManagerTest::testRestoreFromCacheStale()
+{
+    // 超过 30 分钟的缓存标记为过期
+    const QString sample = QStringLiteral(
+        "大致地区：台北\n天气：多云，28°C，体感 32°C，湿度 89%");
+    const qint64 fetchTime = QDateTime::currentMSecsSinceEpoch()
+                           - 45LL * 60 * 1000; // 45 分钟前
+
+    m_mgr->restoreFromCache(sample, fetchTime);
+    QVERIFY(!m_mgr->hasFreshData());
+
+    const QString ctx = m_mgr->buildWeatherContext();
+    QVERIFY(ctx.contains(QStringLiteral("台北")));
+    QVERIFY(ctx.contains(QStringLiteral("多云")));
+    QVERIFY(ctx.contains(QStringLiteral("过期")));
+}
+
+void WeatherManagerTest::testRestoreFromCacheInvalidTimestamp()
+{
+    // timestamp = 0 → 视为非法 → 立即过期
+    const QString sample = QStringLiteral(
+        "大致地区：台北\n天气：多云，28°C，体感 32°C，湿度 89%");
+
+    m_mgr->restoreFromCache(sample, 0);
+    QVERIFY(!m_mgr->hasFreshData());
+
+    const QString ctx = m_mgr->buildWeatherContext();
+    QVERIFY(ctx.contains(QStringLiteral("台北")));
+    QVERIFY(ctx.contains(QStringLiteral("过期")));
+}
+
+void WeatherManagerTest::testRestoreFromCacheFutureTimestamp()
+{
+    // 未来时间戳 → 视为非法 → 立即过期
+    const QString sample = QStringLiteral(
+        "大致地区：台北\n天气：多云，28°C，体感 32°C，湿度 89%");
+    const qint64 futureTime = QDateTime::currentMSecsSinceEpoch()
+                            + 3600000; // 1 小时后
+
+    m_mgr->restoreFromCache(sample, futureTime);
+    QVERIFY(!m_mgr->hasFreshData());
+
+    const QString ctx = m_mgr->buildWeatherContext();
+    QVERIFY(ctx.contains(QStringLiteral("台北")));
+    QVERIFY(ctx.contains(QStringLiteral("过期")));
+}
+
+void WeatherManagerTest::testRestoreFromCacheStrippedStaleMarker()
+{
+    // 缓存的字符串可能含有过期标记（防御性剥离），验证不会重复追加
+    const QString sample = QStringLiteral(
+        "大致地区：台北\n天气：多云，28°C，体感 32°C，湿度 89%\n天气数据可能已过期");
+    const qint64 fetchTime = QDateTime::currentMSecsSinceEpoch()
+                           - 5LL * 60 * 1000; // 5 分钟前 → 新鲜
+
+    m_mgr->restoreFromCache(sample, fetchTime);
+    QVERIFY(m_mgr->hasFreshData());
+
+    const QString ctx = m_mgr->buildWeatherContext();
+    QVERIFY(ctx.contains(QStringLiteral("台北")));
+    QVERIFY(!ctx.contains(QStringLiteral("过期"))); // 被剥离 + 数据新鲜 → 无标记
+}
+
+void WeatherManagerTest::testRestoreFromCacheRefreshClearsStale()
+{
+    // 1) 恢复过期缓存
+    const QString sample = QStringLiteral(
+        "大致地区：台北\n天气：多云，28°C，体感 32°C，湿度 89%");
+    const qint64 staleTime = QDateTime::currentMSecsSinceEpoch()
+                           - 45LL * 60 * 1000;
+    m_mgr->restoreFromCache(sample, staleTime);
+    QVERIFY(!m_mgr->hasFreshData());
+    QVERIFY(m_mgr->buildWeatherContext().contains(QStringLiteral("过期")));
+
+    // 2) 成功刷新天气（mock server 默认返回正常 JSON）
+    m_mgr->requestWeather();
+    QCOMPARE(waitForWeatherResult(), WaitResult::Updated);
+    QVERIFY(m_mgr->hasFreshData());
+
+    // 3) 过期标记清除
+    const QString refreshed = m_mgr->buildWeatherContext();
+    QVERIFY(!refreshed.contains(QStringLiteral("过期")));
+    QVERIFY(refreshed.contains(QStringLiteral("台北")));
+}
+
+
+// ======================================================================
 // WeatherManagerTest — 自动刷新
 // ======================================================================
 

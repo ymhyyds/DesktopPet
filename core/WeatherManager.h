@@ -47,6 +47,12 @@ public:
     /// 格式化当前 UTC 偏移，例如 "UTC+08:00"
     static QString formatUtcOffset();
 
+    /// 从 QSettings 缓存恢复天气数据（启动时调用）
+    void restoreFromCache(const QString &weatherContext, qint64 fetchUtcMs);
+
+    /// 上一次成功获取的 UTC 毫秒时间戳（epoch），0 表示从未成功过
+    qint64 lastFetchUtcMs() const { return m_fetchTimestamp; }
+
     // ---- 测试用辅助 ----
 
     /// 覆写请求基址（默认 https://wttr.in），测试时指向本地 mock server
@@ -97,6 +103,13 @@ private:
     WeatherData m_currentData;
     QDateTime   m_cacheExpiry;
     int         m_cacheDurationMs = 30 * 60 * 1000; // 30 分钟
+
+    /// 上一次成功构建的天气上下文字符串（不含过期标记），
+    /// 用于 cache restore 路径，避免字段级重建。
+    QString m_lastCleanContext;
+
+    /// 上一次成功获取的 UTC 毫秒时间戳（QDateTime::currentMSecsSinceEpoch）
+    qint64  m_fetchTimestamp = 0;
 
     QString m_baseUrl   = QStringLiteral("https://wttr.in");
     int     m_timeoutMs = 10000;
