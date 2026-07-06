@@ -2,6 +2,8 @@
 
 #include <QPoint>
 #include <QSize>
+#include <QRect>
+#include <QRegion>
 
 // ── 纯函数：拖动坐标计算（无 Qt Widgets 依赖，可直接单元测试） ──
 
@@ -26,4 +28,30 @@ inline bool NeedsMaskRefresh(int oldOffsetX, int oldOffsetY,
     return oldOffsetX != newOffsetX
         || oldOffsetY != newOffsetY
         || oldSize != newSize;
+}
+
+// ── 纯函数：PetWindow-local ↔ proxy-local 区域转换 ──
+
+/// 将点从 proxy-local 转换为 PetWindow-local
+inline QPoint ProxyToPetPoint(QPoint proxyLocalPos, int geoOffsetX, int geoOffsetY)
+{
+    return proxyLocalPos + QPoint(geoOffsetX, geoOffsetY);
+}
+
+/// 从 PetWindow-local 永久交互区域派生 proxy-local mask
+/// 1. 平移 (-geoOffsetX, -geoOffsetY)
+/// 2. 相交到 proxy 边界 (0, 0 ~ proxySize)
+inline QRegion DeriveProxyMask(const QRegion &petRegion, int geoOffsetX, int geoOffsetY,
+                                QSize proxySize)
+{
+    return petRegion.translated(-geoOffsetX, -geoOffsetY)
+                    .intersected(QRect(QPoint(0, 0), proxySize));
+}
+
+/// 判断 petRegion 平移后是否完全在 proxy 边界内（无需裁剪）
+inline bool PetRegionFitsProxy(const QRegion &petRegion, int geoOffsetX, int geoOffsetY,
+                                QSize proxySize)
+{
+    QRegion translated = petRegion.translated(-geoOffsetX, -geoOffsetY);
+    return translated == translated.intersected(QRect(QPoint(0, 0), proxySize));
 }

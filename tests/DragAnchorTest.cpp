@@ -280,7 +280,104 @@ private slots:
         QVERIFY(!NeedsMaskRefresh(0, 0, 0, 0, QSize(400, 600), QSize(400, 600)));
     }
 
-    // 16. 连续缩放后拖动不瞬移
+    // ════════════════════════════════════════════════════════════════
+    // 顶部裁剪场景测试（actual-geometry-based offset）
+    // ════════════════════════════════════════════════════════════════
+
+    // 17. 顶部裁剪：anchor = proxyLocal + actualGeoOffset
+    //     PetWindow y=-300, actual proxy y=0 → offsetY=300
+    void test_topClip_anchorFromActualOffset()
+    {
+        // actual offset = actual proxy y - pet y = 0 - (-300) = 300
+        const int actualOffsetY = 300;
+        const int actualOffsetX = 0;
+
+        // 鼠标在 proxy-local (200, 100)
+        const QPoint proxyLocal(200, 100);
+        const QPoint anchor = ComputeDragAnchor(proxyLocal, actualOffsetX, actualOffsetY);
+
+        // anchor 应为 PetWindow-local 坐标 = (200, 100+300) = (200, 400)
+        QCOMPARE(anchor, QPoint(200, 400));
+
+        // 如果使用请求的 offset（假设是 280 而非实际的 300），结果会不同
+        const QPoint wrongAnchor = ComputeDragAnchor(proxyLocal, 0, 280);
+        QVERIFY(wrongAnchor != anchor);
+    }
+
+    // 18. 顶部裁剪：首次 handleDragMove 不瞬移
+    //     PetWindow y=-300, proxy y=0, anchor 正确
+    //     鼠标未移动 → PetWindow 位置不变
+    void test_topClip_noTeleportOnFirstMove()
+    {
+        // PetWindow 当前在 (100, -300)
+        const QPoint petTopLeft(100, -300);
+        // actual proxy y=0, offsetY=300
+        const int actualOffsetY = 300;
+
+        // 鼠标在 proxy-local (200, 100) → PetWindow-local (200, 400)
+        const QPoint proxyLocal(200, 100);
+        const QPoint anchor = ComputeDragAnchor(proxyLocal, 0, actualOffsetY);
+        QCOMPARE(anchor, QPoint(200, 400));
+
+        // 对应全局鼠标位置 = PetWindow top-left + pet-local = (100, -300) + (200, 400) = (300, 100)
+        const QPoint globalMouse = petTopLeft + anchor;
+
+        // 第一次 drag move → newPetTopLeft = globalMouse - anchor = (100, -300)
+        const QPoint newPos = ComputeNewPosition(globalMouse, anchor);
+        QCOMPARE(newPos, petTopLeft);  // 不瞬移！位置保持不变
+    }
+
+    // 19. 顶部裁剪：鼠标移动 delta = PetWindow 移动 delta
+    void test_topClip_dragDeltaConsistent()
+    {
+        // 同上场景
+        const QPoint petTopLeft(100, -300);
+        const QPoint proxyLocal(200, 100);
+        const QPoint anchor = ComputeDragAnchor(proxyLocal, 0, 300);
+
+        // 鼠标在锚点位置
+        const QPoint g0 = petTopLeft + anchor;  // (300, 100)
+        QCOMPARE(ComputeNewPosition(g0, anchor), petTopLeft);
+
+        // 鼠标下移 50px
+        const QPoint g1 = g0 + QPoint(0, 50);
+        const QPoint newPos = ComputeNewPosition(g1, anchor);
+        QCOMPARE(newPos, petTopLeft + QPoint(0, 50));  // PetWindow 也下移 50px
+    }
+
+    // 20. 底部裁剪（正常场景）：offsetY=0，anchor = proxyLocal
+    void test_bottomClip_anchor()
+    {
+        // PetWindow y=500, proxy y=500 → offsetY=0
+        const QPoint proxyLocal(150, 200);
+        const QPoint anchor = ComputeDragAnchor(proxyLocal, 0, 0);
+        QCOMPARE(anchor, proxyLocal);  // 底部裁剪时 anchor = proxy-local
+    }
+
+    // 21. 冻结 offset：拖动期间即使外部修改 offset，使用冻结的 offset 仍能正确跟踪
+    void test_frozenOffsetDuringDrag()
+    {
+        // 按下时 offsetY=300
+        const QPoint frozenOffset(0, 300);
+        const QPoint proxyLocal(200, 100);
+        const QPoint anchor = ComputeDragAnchor(proxyLocal, frozenOffset.x(), frozenOffset.y());
+
+        // 拖动过程中，即使 geoOffset 被外部修改为 280...
+        const QPoint externalOffset(0, 280);
+
+        // 使用冻结的 anchor 计算新位置（而非重新调用 ComputeDragAnchor）
+        const QPoint petTopLeft(100, -300);
+        const QPoint g0 = petTopLeft + anchor;  // (300, 100)
+        const QPoint newPos = ComputeNewPosition(g0 + QPoint(0, 30), anchor);
+
+        // PetWindow 正确下移 30px
+        QCOMPARE(newPos, petTopLeft + QPoint(0, 30));
+
+        // 如果错误地使用外部 offset 重新计算 anchor:
+        const QPoint wrongAnchor = ComputeDragAnchor(proxyLocal, externalOffset.x(), externalOffset.y());
+        const QPoint wrongPos = ComputeNewPosition(g0 + QPoint(0, 30), wrongAnchor);
+        QVERIFY(wrongPos != newPos);  // 结果不同
+    }
     void test_production_scaleThenDrag()
     {
         // 缩放后 press

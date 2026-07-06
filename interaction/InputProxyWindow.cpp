@@ -7,6 +7,8 @@
 #include <QContextMenuEvent>
 #include <QHideEvent>
 #include <QPaintEvent>
+#include <QMoveEvent>
+#include <QResizeEvent>
 #include <QPainter>
 #include <QApplication>
 #include <QCoreApplication>
@@ -60,7 +62,10 @@ bool InputProxyWindow::eventFilter(QObject *watched, QEvent *event)
     // ── (A) PetWindow move/resize 跟踪 — 自动同步 geometry ──
     if (watched == m_petWindow) {
         if (event->type() == QEvent::Move || event->type() == QEvent::Resize) {
-            syncGeometry();
+            if (!m_dragging)
+                syncGeometry();
+            else
+                m_geometrySyncPending = true;   // 拖拽期间仅标记，释放后统一同步
         }
         return false;   // 不吞事件，PetWindow 正常处理
     }
@@ -83,11 +88,9 @@ bool InputProxyWindow::eventFilter(QObject *watched, QEvent *event)
     }
 
     // ── (D) 命中测试守卫 — 统一通过 isInteractivePoint 拦截非交互点击 ──
-    //  只有 preciseRegion.contains + hitTestAt + alphaTestAt 全部通过才放行。
+    //  只有 m_petInteractiveRegion.contains + hitTestAt + alphaTestAt 全部通过才放行。
     //  return true 只阻止 Qt 事件循环内继续派发（不涉及跨进程穿透），
-    //  跨进程穿透已由 OS 级 setMask(preciseRegion) 处理。
-    //  MASK_FALSE_POSITIVE：点在 preciseRegion 内但 hitTest 未命中，
-    //  说明该坐标在 Drawable AABB 的透明间隙内。
+    //  跨进程穿透已由 OS 级 setMask(proxyMask) 处理。
     switch (event->type()) {
     case QEvent::MouseButtonPress:
     case QEvent::MouseButtonRelease:
@@ -118,14 +121,18 @@ bool InputProxyWindow::eventFilter(QObject *watched, QEvent *event)
 }
 
 // ============================================================================
-// Geometry 同步
+// Geometry 同步 — 裁剪到显示器边界，计算 geoOffset
 // ============================================================================
 
 void InputProxyWindow::syncGeometry()
 {
-    // ── 重入保护 ──
-    if (m_syncingGeometry) return;
+    // ── 重入保护：第二次进入时标记 pending，不执行裁剪逻辑 ──
+    if (m_syncingGeometry) {
+        m_maskRefreshPending = true;
+        return;
+    }
     QScopedValueRollback<bool> guard(m_syncingGeometry, true);
+    m_maskRefreshPending = false;
 
     if (!m_petWindow) return;
 
@@ -136,114 +143,247 @@ void InputProxyWindow::syncGeometry()
     const int oldOffsetY = m_geoOffsetY;
     const QSize oldSize = size();
 
-    // ── m_geoOffset 始终为 0 ──
-    // proxy geometry == PetWindow geometry，proxy-local 原点始终与 PetWindow-local 一致
-    // 不再使用 availableGeometry 裁剪，避免可见模型区域失去交互覆盖
-    if (m_geoOffsetX != 0 || m_geoOffsetY != 0) {
-        m_geoOffsetX = 0;
-        m_geoOffsetY = 0;
-    }
+    // ── 查找最佳屏幕 ──
+    QScreen *screen = bestScreenForPetWindow(petGeo);
 
-    // ── 多显示器兜底：窗口中心不在任何屏幕上 → 移到主屏幕 ──
-    // 仅在极少数窗口完全离屏时触发，不影响正常边缘位置
-    if (!QGuiApplication::screenAt(petGeo.center())) {
+    QRect proxyGeo;
+    if (!screen) {
+        // ── 窗口完全不在任何屏幕上 → fallback 到主屏幕 ──
         QScreen *primary = QGuiApplication::primaryScreen();
         if (primary) {
-            const QRect primaryScreen = primary->geometry();  // 完整屏幕区域
-            int cx = qBound(primaryScreen.left(), petGeo.left(),
-                            primaryScreen.right() - qMin(petGeo.width(), primaryScreen.width()));
-            int cy = qBound(primaryScreen.top(), petGeo.top(),
-                            primaryScreen.bottom() - qMin(petGeo.height(), primaryScreen.height()));
-            setGeometry(QRect(QPoint(cx, cy), petGeo.size()));
+            const QRect screenGeo = primary->geometry();
+            int cx = qBound(screenGeo.left(), petGeo.left(),
+                            screenGeo.right() - qMin(petGeo.width(), screenGeo.width()));
+            int cy = qBound(screenGeo.top(), petGeo.top(),
+                            screenGeo.bottom() - qMin(petGeo.height(), screenGeo.height()));
+            proxyGeo = QRect(QPoint(cx, cy), petGeo.size());
+            m_geoOffsetX = proxyGeo.left() - petGeo.left();
+            m_geoOffsetY = proxyGeo.top()  - petGeo.top();
         } else {
-            setGeometry(petGeo);
+            // 无可用屏幕 → 跟随 PetWindow
+            proxyGeo = petGeo;
+            m_geoOffsetX = 0;
+            m_geoOffsetY = 0;
         }
     } else {
-        // ── 窗口中心在某个屏幕上 → proxy 完整跟随 PetWindow ──
-        // 超出屏幕边缘的部分由 OS 自动裁剪输入，不需手动缩小 proxy
-        setGeometry(petGeo);
+        // ── 裁剪 proxy 到该屏幕边界 ──
+        const QRect screenGeo = screen->geometry();
+
+        int newX  = qMax(screenGeo.left(),   petGeo.left());
+        int newY  = qMax(screenGeo.top(),    petGeo.top());
+        int newR  = qMin(screenGeo.right(),  petGeo.right());
+        int newB  = qMin(screenGeo.bottom(), petGeo.bottom());
+
+        m_geoOffsetX = newX - petGeo.left();
+        m_geoOffsetY = newY - petGeo.top();
+
+        int newW = qMax(1, newR - newX);
+        int newH = qMax(1, newB - newY);
+
+        proxyGeo = QRect(QPoint(newX, newY), QSize(newW, newH));
     }
 
-    // ── 若之前因离屏隐藏，现在重新显示 ──
+    // ── 应用 proxy geometry ──
+    setGeometry(proxyGeo);
+
+    // ── ★ 重新读取实际 geometry，以实际值为准 ──
+    //    Windows 可能调整请求的 geometry（如顶部越界时 clamp 到屏幕顶部），
+    //    必须用实际值计算 offset，否则 proxy-local ↔ pet-local 转换会偏移。
+    const QRect actualGeo = geometry();
+    m_geoOffsetX = actualGeo.x() - petGeo.x();
+    m_geoOffsetY = actualGeo.y() - petGeo.y();
+
+#ifndef QT_NO_DEBUG
+    if (proxyGeo != actualGeo) {
+        qDebug() << "[InputProxy] syncGeometry: actual differs from requested"
+                 << "requested=" << proxyGeo
+                 << "actual=" << actualGeo
+                 << "offset=" << m_geoOffsetX << m_geoOffsetY;
+    }
+#endif
+
+    // ── 确保可见 ──
     if (!isVisible()) {
         show();
         raise();
     }
 
-    // ── 统一判断：geometry/offset 变化 → 刷新 mask ──
-    // 拖动分支和非拖动分支都汇聚于此，由同一条件控制
+    // ── 判断是否需要刷新 mask ──
     if (NeedsMaskRefresh(oldOffsetX, oldOffsetY,
                           m_geoOffsetX, m_geoOffsetY,
-                          oldSize, size()))
+                          oldSize, actualGeo.size()))
     {
         updateInputMask();
+    } else if (m_maskRefreshPending) {
+        // 重入时标记了 pending，即使在最外层也没触发 refresh → 手动触发
+        ensureMaskRefresh();
     }
+}
+
+void InputProxyWindow::ensureMaskRefresh()
+{
+    if (!m_petInteractiveRegionValid) {
+        updateInputMask();
+    } else {
+        // 至少用当前 petRegion 重新派生一次 proxy mask
+        QRegion proxyMask = m_petInteractiveRegion.translated(-m_geoOffsetX, -m_geoOffsetY)
+                                              .intersected(QRect(0, 0, width(), height()));
+        if (proxyMask.isEmpty())
+            return;
+        if (m_proxyMaskRegionValid && m_proxyMaskRegion == proxyMask)
+            return;
+        setMask(proxyMask);
+        m_proxyMaskRegion = proxyMask;
+        m_proxyMaskRegionValid = true;
+    }
+}
+
+QScreen *InputProxyWindow::bestScreenForPetWindow(const QRect &petGeo) const
+{
+    // 1. 优先使用 PetWindow 当前所属 screen
+    QScreen *bestScreen = m_petWindow ? m_petWindow->screen() : nullptr;
+    int maxArea = 0;
+    if (bestScreen) {
+        QRect intersect = petGeo.intersected(bestScreen->geometry());
+        if (!intersect.isEmpty())
+            maxArea = intersect.width() * intersect.height();
+        else
+            bestScreen = nullptr;
+    }
+
+    // 2. 遍历所有屏幕，选择相交面积最大的
+    const auto screens = QGuiApplication::screens();
+    for (QScreen *s : screens) {
+        QRect intersect = petGeo.intersected(s->geometry());
+        int area = intersect.width() * intersect.height();
+        if (area > maxArea) {
+            maxArea = area;
+            bestScreen = s;
+        }
+    }
+
+    return bestScreen;
 }
 
 // ============================================================================
 // Mask 更新 — 使用逐 Drawable AABB + 4px padding 构建多矩形 QRegion
+//
+// 流程：
+//   1. 从 Live2DView 获取所有可见 Drawable 的紧贴包围盒（PetWindow 坐标）
+//   2. 构建 m_petInteractiveRegion（PetWindow-local，不裁剪，不作废）
+//   3. 派生 m_proxyMaskRegion（proxy-local，平移 + intersection）
+//   4. setMask(m_proxyMaskRegion)
 // ============================================================================
 
 void InputProxyWindow::updateInputMask()
 {
     if (!m_live2DView) {
-        // 无模型 → 保留上一次有效的 preciseRegion，不清除 mask
+        // 无模型 → 保留上一次有效的 any region
         return;
     }
 
-    // 1. 获取所有可见 Drawable 的紧贴包围盒（PetWindow 本地像素坐标）
+    // ── Step 1: 获取所有可见 Drawable 的紧贴包围盒（PetWindow 本地坐标） ──
     QVector<QRect> drawableRects;
     m_live2DView->getVisibleDrawableRects(drawableRects);
 
     if (drawableRects.isEmpty()) {
-        // 无可见 drawable → 保留上一次有效的 preciseRegion
+        // 无可见 drawable → 保留上一次有效的 m_petInteractiveRegion
         return;
     }
 
-    // 2. 构建多矩形 QRegion：每个 Drawable AABB + 4px padding
-    //    Proxy 与 PetWindow geometry 完全一致，无需坐标转换
-    //    超出 proxy 边界的部分在步骤 3 中被 intersected 裁剪
-    QRegion preciseRegion;
+    // ── Step 2: 构建 PetWindow-local 永久交互区域 ──
+    //    使用 Live2DView/PetWindow 的完整尺寸，不使用被裁剪后的 proxy size
+    //    不裁剪、不平移，始终保持 PetWindow 坐标系
+    QRegion petRegion;
     for (const QRect &rect : drawableRects) {
         QRect r = rect.adjusted(-kMaskPaddingPx, -kMaskPaddingPx,
                                  kMaskPaddingPx, kMaskPaddingPx);
-        preciseRegion |= QRegion(r);
+        petRegion |= QRegion(r);
     }
 
-    // 3. 约束到 InputProxyWindow 边界
-    preciseRegion = preciseRegion.intersected(QRect(0, 0, width(), height()));
-
-    if (preciseRegion.isEmpty()) {
-        // 裁剪后为空 → 保留上一次有效的 preciseRegion
+    if (petRegion.isEmpty()) {
         return;
     }
 
-    // 4. 全窗口 → 清除 mask（罕见情况）
-    if (preciseRegion == QRegion(QRect(0, 0, width(), height()))) {
-        if (m_preciseRegionValid) {
+    // 保存永久区域（PetWindow-local，不受 proxy 裁剪影响）
+    m_petInteractiveRegion = petRegion;
+    m_petInteractiveRegionValid = true;
+
+    // ── Step 3: 派生 proxy-local 临时 mask ──
+    //    m_petInteractiveRegion 是 PetWindow-local，
+    //    平移 (-m_geoOffsetX, -m_geoOffsetY) 转为 proxy-local，
+    //    再 intersected 到 proxy 边界
+    QRegion proxyMask = m_petInteractiveRegion.translated(-m_geoOffsetX, -m_geoOffsetY);
+    proxyMask = proxyMask.intersected(QRect(0, 0, width(), height()));
+
+    if (proxyMask.isEmpty()) {
+        // 裁剪后为空 → 保留上一次有效的 setMask（不清除 mask）
+        // 但 m_proxyMaskRegionValid 不变
+        return;
+    }
+
+    // ── Step 4: 全窗口 → 清除 mask ──
+    if (proxyMask == QRegion(QRect(0, 0, width(), height()))) {
+        if (m_proxyMaskRegionValid) {
             clearMask();
-            m_preciseRegionValid = false;
+            m_proxyMaskRegionValid = false;
         }
         return;
     }
 
-    // 5. 防重复：相同 region 跳过
-    if (m_preciseRegionValid && m_preciseRegion == preciseRegion) {
+    // ── Step 5: 防重复 ──
+    if (m_proxyMaskRegionValid && m_proxyMaskRegion == proxyMask) {
         return;
     }
 
-    // 6. 应用 mask
-    setMask(preciseRegion);
-    m_preciseRegion = preciseRegion;
-    m_preciseRegionValid = true;
+    // ── Step 6: 应用 mask ──
+    setMask(proxyMask);
+    m_proxyMaskRegion = proxyMask;
+    m_proxyMaskRegionValid = true;
 
 #ifndef QT_NO_DEBUG
     qDebug() << "[InputProxy] updateInputMask"
              << "drawableCount=" << drawableRects.size()
              << "proxySize=" << size()
+             << "geoOffset=" << m_geoOffsetX << m_geoOffsetY
              << "firstDrawableRect=" << drawableRects.first()
-             << "maskBB=" << preciseRegion.boundingRect();
+             << "petRegionBB=" << m_petInteractiveRegion.boundingRect()
+             << "proxyMaskBB=" << m_proxyMaskRegion.boundingRect();
 #endif
+}
+
+// ============================================================================
+// moveEvent / resizeEvent — 检测 Windows 对 Proxy geometry 的隐式调整
+// ============================================================================
+
+void InputProxyWindow::moveEvent(QMoveEvent *event)
+{
+    // 只在非拖拽、非 syncGeometry 重入时纠正 offset
+    // setGeometry 内部的 moveEvent 由 m_syncingGeometry 守卫跳过，
+    // 拖拽期间的 moveEvent 由 m_dragging 守卫跳过，
+    // 防止递归修改 offset 或触发 syncGeometry。
+    if (m_petWindow && !m_dragging && !m_syncingGeometry) {
+        const QPoint actualTopLeft = geometry().topLeft();
+        const QPoint petTopLeft = m_petWindow->geometry().topLeft();
+        const int newOffX = actualTopLeft.x() - petTopLeft.x();
+        const int newOffY = actualTopLeft.y() - petTopLeft.y();
+        if (newOffX != m_geoOffsetX || newOffY != m_geoOffsetY) {
+            m_geoOffsetX = newOffX;
+            m_geoOffsetY = newOffY;
+            // offset 变化 → mask 平移变化 → 刷新
+            if (m_petInteractiveRegionValid)
+                ensureMaskRefresh();
+        }
+    }
+    QWidget::moveEvent(event);
+}
+
+void InputProxyWindow::resizeEvent(QResizeEvent *event)
+{
+    // 尺寸变化 → mask 裁剪边界变化 → 刷新
+    if (!m_dragging && m_petInteractiveRegionValid)
+        ensureMaskRefresh();
+    QWidget::resizeEvent(event);
 }
 
 // ============================================================================
@@ -265,25 +405,29 @@ void InputProxyWindow::mousePressEvent(QMouseEvent *event)
     }
 
     // Hit-area 细分（头部/身体）
-    // Proxy-local == PetWindow-local，直接使用 event position
-    const float px = static_cast<float>(event->position().x());
-    const float py = static_cast<float>(event->position().y());
+    // proxy-local → PetWindow-local（加上 geoOffset）
+    const float proxyPx = static_cast<float>(event->position().x());
+    const float proxyPy = static_cast<float>(event->position().y());
+    const float petPx = proxyPx + static_cast<float>(m_geoOffsetX);
+    const float petPy = proxyPy + static_cast<float>(m_geoOffsetY);
+
     bool isHead = false;
-    m_live2DView->hitTestAt(px, py, isHead);
-    bool alphaOk = m_live2DView->alphaTestAt(px, py);
+    m_live2DView->hitTestAt(petPx, petPy, isHead);
+    bool alphaOk = m_live2DView->alphaTestAt(petPx, petPy);
     m_pressInHeadArea = alphaOk && isHead;
     m_pressInBodyArea = alphaOk && !isHead;
 
     // 记录拖拽起始偏移（PetWindow 本地坐标，一次拖动期间不变）
-    // Proxy-local == PetWindow-local，无需 geoOffset 转换
     {
-        m_dragAnchorInPet = event->position().toPoint();
+        m_dragAnchorInPet = QPoint(qRound(petPx), qRound(petPy));
+        m_dragGeoOffsetAtPress = QPoint(m_geoOffsetX, m_geoOffsetY);
 #ifndef QT_NO_DEBUG
         qDebug() << "[InputProxy] mousePress"
                  << "petGeo=" << (m_petWindow ? m_petWindow->geometry() : QRect())
                  << "proxyGeo=" << geometry()
                  << "proxyLocal=" << event->position().toPoint()
-                 << "anchorInPet=" << m_dragAnchorInPet;
+                 << "petLocal=" << m_dragAnchorInPet
+                 << "geoOffset=" << m_geoOffsetX << m_geoOffsetY;
 #endif
     }
     m_pressStartPos = event->pos();
@@ -303,6 +447,7 @@ void InputProxyWindow::mouseMoveEvent(QMouseEvent *event)
             if (dist > kDragThreshold) {
                 // 超过阈值 → 启动拖拽
                 m_dragging = true;
+                m_dragGeoOffsetAtPress = QPoint(m_geoOffsetX, m_geoOffsetY);
                 grabMouse();
 
                 // 已移动超过阈值，不再作为点击处理
@@ -333,6 +478,10 @@ void InputProxyWindow::mouseReleaseEvent(QMouseEvent *event)
             // 拖拽结束
             cleanupDrag();
             emit dragFinished();
+            // ── 释放后重新同步 Proxy geometry、offset 和 mask ──
+            //    此时 PetWindow 已移动到最终位置，Proxy 冻结在按下时的位置，
+            //    需要重新裁剪、对齐并刷新 mask。
+            syncGeometry();
         } else if (m_pressInHeadArea) {
             // 头部点击 → 摸摸头
             m_pressInHeadArea = false;
@@ -370,6 +519,7 @@ void InputProxyWindow::mouseDoubleClickEvent(QMouseEvent *event)
 void InputProxyWindow::cleanupDrag()
 {
     m_dragging = false;
+    m_geometrySyncPending = false;
     m_pressInHeadArea = false;
     m_pressInBodyArea = false;
     m_suppressNextReleaseSingle = false;
@@ -382,14 +532,16 @@ bool InputProxyWindow::isInteractivePoint(const QPointF &proxyLocalPos)
 {
     const QPoint pt = proxyLocalPos.toPoint();
 
-    // (1) OS-level mask：必须在 preciseRegion 内
-    if (!m_preciseRegionValid || !m_preciseRegion.contains(pt))
+    // ── proxy-local → PetWindow-local ──
+    const QPoint petPt(pt.x() + m_geoOffsetX, pt.y() + m_geoOffsetY);
+
+    // (1) PetWindow-local 永久交互区域
+    if (!m_petInteractiveRegionValid || !m_petInteractiveRegion.contains(petPt))
         return false;
 
     // (2) 模型内容：必须命中交互区域（HitArea / tight bounds）
-    //    Proxy-local == PetWindow-local，无需 geoOffset 转换
-    const float petPx = static_cast<float>(pt.x());
-    const float petPy = static_cast<float>(pt.y());
+    const float petPx = static_cast<float>(petPt.x());
+    const float petPy = static_cast<float>(petPt.y());
     bool isHead = false;
     if (!m_live2DView || !m_live2DView->hitTestAt(petPx, petPy, isHead))
         return false;
@@ -415,9 +567,11 @@ void InputProxyWindow::handleDragMove(QMouseEvent *event)
 #endif
 
     if (m_petWindow) {
+        // ── 只移动 PetWindow，不改变 Proxy geometry ──
+        //    grabMouse() 确保 Proxy 在 PetWindow 移开后继续接收鼠标事件。
+        //    Proxy geometry 和 offset 在整个拖动期间冻结，
+        //    释放后由 syncGeometry() 重新对齐。
         m_petWindow->move(newPetTopLeft);
-        // 拖动期间 proxy 跟随 PetWindow 完整 geometry
-        setGeometry(m_petWindow->geometry());
     } else {
         move(newPetTopLeft);
     }
@@ -453,7 +607,7 @@ void InputProxyWindow::hideEvent(QHideEvent *event)
 }
 
 // ============================================================================
-// 绘制：仅在多矩形 preciseRegion 内绘制 alpha=1 输入表面
+// 绘制：仅在 m_proxyMaskRegion 内绘制 alpha=1 输入表面
 // ============================================================================
 
 void InputProxyWindow::paintEvent(QPaintEvent * /*event*/)
@@ -464,9 +618,9 @@ void InputProxyWindow::paintEvent(QPaintEvent * /*event*/)
     // 整窗填充 alpha=0（确保透明）
     painter.fillRect(rect(), QColor(0, 0, 0, 0));
 
-    // 在 preciseRegion 内绘制 alpha=1 输入表面（视觉不可见，确保 WS_EX_LAYERED 接收鼠标事件）
-    if (m_preciseRegionValid) {
-        painter.setClipRegion(m_preciseRegion);
-        painter.fillRect(m_preciseRegion.boundingRect(), QColor(0, 0, 0, 1));
+    // 在 m_proxyMaskRegion 内绘制 alpha=1 输入表面（OS 级鼠标穿透用）
+    if (m_proxyMaskRegionValid) {
+        painter.setClipRegion(m_proxyMaskRegion);
+        painter.fillRect(m_proxyMaskRegion.boundingRect(), QColor(0, 0, 0, 1));
     }
 }

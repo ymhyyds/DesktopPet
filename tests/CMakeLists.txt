@@ -170,3 +170,32 @@ add_test(NAME test_drawable_bounds
     COMMAND test_drawable_bounds
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# ── Region Mask Unit Tests ──────────────────────────────────────────────
+# Pure-function tests for PetWindow-local ↔ proxy-local region conversion.
+# Uses QRegion algebra with DeriveProxyMask / ProxyToPetPoint / PetRegionFitsProxy.
+# No window system, OpenGL, or Live2D model dependencies.
+
+add_executable(test_region_mask
+    ${CMAKE_CURRENT_SOURCE_DIR}/RegionMaskTest.cpp
+)
+
+set_target_properties(test_region_mask PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_region_mask PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/interaction
+)
+
+target_link_libraries(test_region_mask PRIVATE
+    Qt6::Test
+    Qt6::Core
+    Qt6::Gui
+)
+
+add_test(NAME test_region_mask
+    COMMAND test_region_mask
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
