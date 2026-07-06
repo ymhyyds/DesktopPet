@@ -4,6 +4,7 @@
 #include <QList>
 #include <QPixmap>
 #include <QString>
+#include <QInputMethodEvent>
 
 class QTextEdit;
 class QLineEdit;
@@ -50,6 +51,7 @@ protected:
     void closeEvent(QCloseEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void changeEvent(QEvent *event) override;
+    bool eventFilter(QObject *obj, QEvent *event) override;
 
 private slots:
     void onSendClicked();
@@ -64,6 +66,7 @@ private:
     void setupUi();
     void appendUserMessage(const QString &text);
     void appendFormattedLine(const QString &html, Qt::Alignment align);
+    void adjustInputEditHeight();
 
     QString buildAssistantBubble(const QString &time, const QString &text);
     QString buildUserBubble(const QString &time, const QString &text);
@@ -80,13 +83,14 @@ private:
 
 private:
     QTextEdit   *m_historyView = nullptr;
-    QLineEdit   *m_inputEdit   = nullptr;
+    QTextEdit   *m_inputEdit   = nullptr;
     QPushButton *m_sendButton  = nullptr;
     QPushButton *m_fileButton  = nullptr;
 
     QString m_characterName = QStringLiteral("桌宠");   // 显示名
     QString m_characterKey;                               // DB 查询用的 key（文件夹名）
     bool    m_isStreaming = false;
+    bool    m_imeComposing = false;        // 输入法正在组合中
 
     MemoryDB *m_memoryDb = nullptr;
 

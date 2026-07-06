@@ -25,8 +25,10 @@
 #include <QPropertyAnimation>
 #include <QEasingCurve>
 #include <QToolTip>
+#include <QKeyEvent>
 #include <QSettings>
 #include <QEvent>
+#include <QTimer>
 #include <QMessageBox>
 
 // ============================================================================
@@ -84,6 +86,11 @@ ChatWindow::ChatWindow(QWidget *parent)
             m_backgroundImagePath.clear();
         }
     }
+
+    // 布局稳定后执行一次输入框高度修正，防初始 150px 问题
+    QTimer::singleShot(0, this, [this]() {
+        if (m_inputEdit) m_inputEdit->setFixedHeight(36);
+    });
 }
 
 void ChatWindow::setupUi()
@@ -184,9 +191,14 @@ void ChatWindow::setupUi()
     m_historyView->setAlignment(Qt::AlignLeft);
 
     // ========== 输入区 ==========
-    m_inputEdit = new QLineEdit(this);
-    m_inputEdit->setPlaceholderText(QStringLiteral("说点什么吧..."));
+    m_inputEdit = new QTextEdit(this);
+    m_inputEdit->setPlaceholderText(QStringLiteral("说点什么吧... （Shift+Enter换行，Enter发送）"));
     m_inputEdit->setFixedHeight(36);
+    m_inputEdit->setMaximumHeight(150);
+    m_inputEdit->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_inputEdit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_inputEdit->setAcceptRichText(false);
+    m_inputEdit->installEventFilter(this);
 
     m_fileButton = new QPushButton(QStringLiteral("📎"), this);
     m_fileButton->setFixedSize(36, 36);
@@ -214,7 +226,7 @@ void ChatWindow::setupUi()
 
     // ========== 信号连接 ==========
     connect(m_sendButton, &QPushButton::clicked, this, &ChatWindow::onSendClicked);
-    connect(m_inputEdit, &QLineEdit::returnPressed, this, &ChatWindow::onSendClicked);
+    connect(m_inputEdit, &QTextEdit::textChanged, this, &ChatWindow::adjustInputEditHeight);
     connect(m_fileButton, &QPushButton::clicked, this, &ChatWindow::onFileClicked);
 
     connect(m_searchToggleBtn, &QPushButton::clicked, this, &ChatWindow::onSearchToggled);
@@ -292,6 +304,31 @@ void ChatWindow::changeEvent(QEvent *event)
     QWidget::changeEvent(event);
 }
 
+bool ChatWindow::eventFilter(QObject *obj, QEvent *event)
+{
+    if (obj == m_inputEdit) {
+        // 跟踪输入法组合状态：Enter 仅在组合结束后发送
+        if (event->type() == QEvent::InputMethod) {
+            auto *imeEvent = static_cast<QInputMethodEvent *>(event);
+            m_imeComposing = !imeEvent->preeditString().isEmpty();
+            return false; // 让输入法继续处理
+        }
+        if (event->type() == QEvent::KeyPress) {
+            auto *keyEvent = static_cast<QKeyEvent *>(event);
+            if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter) {
+                if (!(keyEvent->modifiers() & Qt::ShiftModifier)) {
+                    if (m_imeComposing) {
+                        return false; // 输入法正在组合，Enter 用于提交候选词，不发送
+                    }
+                    onSendClicked();
+                    return true;
+                }
+            }
+        }
+    }
+    return QWidget::eventFilter(obj, event);
+}
+
 void ChatWindow::paintEvent(QPaintEvent *event)
 {
     QPainter painter(this);
@@ -335,13 +372,38 @@ void ChatWindow::paintEvent(QPaintEvent *event)
     QWidget::paintEvent(event);
 }
 
+void ChatWindow::adjustInputEditHeight()
+{
+    if (!m_inputEdit) return;
+
+    // 空输入直接保持最小高度，避免文档布局未就绪时计算错误
+    if (m_inputEdit->toPlainText().isEmpty()) {
+        m_inputEdit->setFixedHeight(36);
+        return;
+    }
+
+    // viewport 宽度尚未生效时也保持最小高度
+    const int vpW = m_inputEdit->viewport()->width();
+    if (vpW <= 0) {
+        m_inputEdit->setFixedHeight(36);
+        return;
+    }
+
+    m_inputEdit->document()->setTextWidth(vpW);
+    const int docHeight = static_cast<int>(m_inputEdit->document()->size().height());
+    const int frameH = m_inputEdit->frameWidth() * 2;
+    const int newHeight = qMax(36, qMin(docHeight + frameH + 4, 150));
+    m_inputEdit->setFixedHeight(newHeight);
+}
+
 void ChatWindow::onSendClicked()
 {
-    const QString text = m_inputEdit->text().trimmed();
+    const QString text = m_inputEdit->toPlainText().trimmed();
     if (text.isEmpty()) return;
 
     appendUserMessage(text);
     m_inputEdit->clear();
+    m_inputEdit->setFixedHeight(36);
     emit userMessageSent(text);
 }
 
@@ -355,11 +417,11 @@ void ChatWindow::onFileClicked()
 
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        m_inputEdit->setText(QStringLiteral("（文件打开失败：%1）").arg(filePath));
+        m_inputEdit->setPlainText(QStringLiteral("（文件打开失败：%1）").arg(filePath));
         return;
     }
     if (file.size() > 512 * 1024) {
-        m_inputEdit->setText(QStringLiteral("（文件超过 512KB，请缩小后再试）"));
+        m_inputEdit->setPlainText(QStringLiteral("（文件超过 512KB，请缩小后再试）"));
         return;
     }
 
@@ -368,11 +430,11 @@ void ChatWindow::onFileClicked()
     const QString content = stream.readAll();
     file.close();
 
-    const QString existing = m_inputEdit->text();
+    const QString existing = m_inputEdit->toPlainText();
     if (existing.isEmpty()) {
-        m_inputEdit->setText(content);
+        m_inputEdit->setPlainText(content);
     } else {
-        m_inputEdit->setText(existing + QStringLiteral("\n") + content);
+        m_inputEdit->setPlainText(existing + QStringLiteral("\n") + content);
     }
     m_inputEdit->setFocus();
 }
@@ -412,8 +474,15 @@ QString ChatWindow::buildAssistantBubble(const QString &, const QString &text)
 
 QString ChatWindow::buildUserBubble(const QString &, const QString &text)
 {
+    // 使用 table 实现：块级右对齐将整个表格推到右侧，
+    // 单元格内 text-align:left 保证文字左对齐。
+    // 表格无固定宽度，内容短时自动收缩，内容长时自然换行。
     return QStringLiteral(
-        "<div style='font-size:15px; line-height:1.8; padding:2px 0;'>%1</div>"
+        "<table style='border:none;' cellpadding='0' cellspacing='0'><tr>"
+        "<td style='text-align:left; border:none; "
+        "font-size:15px; line-height:1.8; padding:2px 0;'>"
+        "%1"
+        "</td></tr></table>"
     ).arg(text.toHtmlEscaped());
 }
 
@@ -458,6 +527,7 @@ void ChatWindow::updateAssistantMessage(const QString &text)
 
 void ChatWindow::finishAssistantMessage()
 {
+    if (!m_isStreaming) return;
     m_isStreaming = false;
 }
 
