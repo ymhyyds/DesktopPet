@@ -7,11 +7,13 @@
 #include <QLabel>
 #include <QVBoxLayout>
 #include <QHBoxLayout>
+#include <QStackedWidget>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QCloseEvent>
 #include <QDateTime>
 #include <QPainter>
 #include <QPaintEvent>
-#include <QScrollBar>
 #include <QFileDialog>
 #include <QTextStream>
 #include <QTextBlockFormat>
@@ -28,6 +30,9 @@
 #include <QSettings>
 #include <QEvent>
 #include <QMessageBox>
+#include <QKeyEvent>
+#include <QInputMethodEvent>
+#include <QTimer>
 
 // ============================================================================
 // 即时 tooltip：鼠标移上立刻显示，不等待系统延迟
@@ -59,7 +64,20 @@ void installInstantTooltip(QWidget *w)
 {
     w->installEventFilter(new InstantTooltipFilter(w));
 }
+
+/// 辅助：自动调整 QTextEdit 高度以适应其文档内容
+void autoResizeTextEdit(QTextEdit *te)
+{
+    if (!te) return;
+    te->document()->setTextWidth(te->viewport()->width());
+    int h = static_cast<int>(te->document()->size().height());
+    te->setFixedHeight(qMax(h + 4, 24));
 }
+}
+
+// ============================================================================
+// 构造
+// ============================================================================
 
 ChatWindow::ChatWindow(QWidget *parent)
     : QWidget(parent)
@@ -85,6 +103,10 @@ ChatWindow::ChatWindow(QWidget *parent)
         }
     }
 }
+
+// ============================================================================
+// setupUi — 完整 UI 搭建
+// ============================================================================
 
 void ChatWindow::setupUi()
 {
@@ -173,24 +195,63 @@ void ChatWindow::setupUi()
 
     m_searchBar->setVisible(false);
 
-    // ========== 历史记录区 ==========
-    m_historyView = new QTextEdit(this);
-    m_historyView->setReadOnly(true);
-    m_historyView->setStyleSheet(QStringLiteral(
+    // ========== 消息区域（QStackedWidget） ==========
+    m_messageStack = new QStackedWidget(this);
+    m_messageStack->setStyleSheet(QStringLiteral("background: transparent;"));
+
+    // ---- Page 0: 正常聊天会话（QScrollArea + 消息列表） ----
+    m_scrollArea = new QScrollArea();
+    m_scrollArea->setWidgetResizable(true);
+    m_scrollArea->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_scrollArea->setStyleSheet(QStringLiteral(
+        "QScrollArea { background: transparent; border: none; }"
+    ));
+    // 让 viewport 背景透明，使窗口背景图（paintEvent）或系统主题可穿透
+    m_scrollArea->viewport()->setAutoFillBackground(false);
+
+    m_conversationContainer = new QWidget();
+    m_conversationContainer->setStyleSheet(QStringLiteral("background: transparent;"));
+    m_messageListLayout = new QVBoxLayout(m_conversationContainer);
+    m_messageListLayout->setContentsMargins(0, 0, 0, 0);
+    m_messageListLayout->setSpacing(0);
+    // 底部伸缩项：当消息较少时让消息靠上排列
+    m_messageListLayout->addStretch();
+
+    m_scrollArea->setWidget(m_conversationContainer);
+    m_messageStack->addWidget(m_scrollArea);   // index 0
+
+    // ---- Page 1: 搜索结果视图（QTextEdit，复用旧搜索逻辑） ----
+    m_searchResultView = new QTextEdit();
+    m_searchResultView->setReadOnly(true);
+    m_searchResultView->setStyleSheet(QStringLiteral(
         "QTextEdit { background: transparent; border: none; padding: 8px; }"
     ));
-    m_historyView->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-    m_historyView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_historyView->setAlignment(Qt::AlignLeft);
+    m_searchResultView->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_searchResultView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_messageStack->addWidget(m_searchResultView);  // index 1
+
+    m_messageStack->setCurrentIndex(0);
 
     // ========== 输入区 ==========
-    m_inputEdit = new QLineEdit(this);
-    m_inputEdit->setPlaceholderText(QStringLiteral("说点什么吧..."));
+    m_inputEdit = new QTextEdit(this);
+    m_inputEdit->setPlaceholderText(QStringLiteral("说点什么吧... （Shift+Enter换行，Enter发送）"));
     m_inputEdit->setFixedHeight(36);
+    m_inputEdit->setMaximumHeight(150);
+    m_inputEdit->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+    m_inputEdit->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_inputEdit->setAcceptRichText(false);
+    // 无自定义 stylesheet — 使用系统原生样式，自动适配浅色/深色主题
+    // 安装事件过滤器以捕获 Enter 键发送
+    m_inputEdit->installEventFilter(this);
+
+    // 输入框自动增高
+    connect(m_inputEdit, &QTextEdit::textChanged, this, &ChatWindow::adjustInputEditHeight);
 
     m_fileButton = new QPushButton(QStringLiteral("📎"), this);
     m_fileButton->setFixedSize(36, 36);
     m_fileButton->setCursor(Qt::PointingHandCursor);
+
     m_sendButton = new QPushButton(QStringLiteral("发送"), this);
     m_sendButton->setFixedHeight(36);
     m_sendButton->setCursor(Qt::PointingHandCursor);
@@ -208,13 +269,12 @@ void ChatWindow::setupUi()
     mainLayout->setSpacing(0);
     mainLayout->addLayout(toolbarLayout);
     mainLayout->addWidget(m_searchBar);
-    mainLayout->addWidget(m_historyView, 1);
+    mainLayout->addWidget(m_messageStack, 1);
     mainLayout->addLayout(inputLayout);
     setLayout(mainLayout);
 
     // ========== 信号连接 ==========
     connect(m_sendButton, &QPushButton::clicked, this, &ChatWindow::onSendClicked);
-    connect(m_inputEdit, &QLineEdit::returnPressed, this, &ChatWindow::onSendClicked);
     connect(m_fileButton, &QPushButton::clicked, this, &ChatWindow::onFileClicked);
 
     connect(m_searchToggleBtn, &QPushButton::clicked, this, &ChatWindow::onSearchToggled);
@@ -240,11 +300,11 @@ void ChatWindow::setCharacterName(const QString &name)
 void ChatWindow::showAndFocus()
 {
     if (isMinimized()) {
-        showNormal();       // 从最小化恢复正常
+        showNormal();
     } else if (isHidden()) {
-        show();             // 从隐藏（X 掉）恢复显示
+        show();
         if (isMaximized()) {
-            showNormal();   // 如果之前是最大化后隐藏，恢复到普通状态
+            showNormal();
         }
     }
     raise();
@@ -254,7 +314,6 @@ void ChatWindow::showAndFocus()
 
 void ChatWindow::closeEvent(QCloseEvent *event)
 {
-    // 保存当前正常几何（退出时记录，下次打开恢复用）
     if (!isMaximized() && !isFullScreen()) {
         m_normalGeometry = geometry();
         QSettings settings(QStringLiteral("DesktopPet"), QStringLiteral("ChatWindow"));
@@ -270,26 +329,54 @@ void ChatWindow::changeEvent(QEvent *event)
         const bool wasMaximized = windowState() & Qt::WindowMaximized;
         const bool wasFullScreen = windowState() & Qt::WindowFullScreen;
 
-        // 调用基类先更新状态
         QWidget::changeEvent(event);
 
         const bool isMaximized = windowState() & Qt::WindowMaximized;
         const bool isFullScreen = windowState() & Qt::WindowFullScreen;
 
         if ((isMaximized || isFullScreen) && !wasMaximized && !wasFullScreen) {
-            // 即将全屏/最大化：保存当前几何
             m_normalGeometry = geometry();
             qInfo() << "[ChatWindow] 保存全屏前几何:" << m_normalGeometry;
         } else if (!isMaximized && !isFullScreen && (wasMaximized || wasFullScreen)) {
-            // 从全屏/最大化恢复：强制恢复保存的几何
             qInfo() << "[ChatWindow] 恢复几何:" << m_normalGeometry;
             if (m_normalGeometry.isValid()) {
                 setGeometry(m_normalGeometry);
             }
         }
-        return; // 基类已调用
+        return;
     }
     QWidget::changeEvent(event);
+}
+
+void ChatWindow::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    updateBubbleMaxWidth();
+}
+
+bool ChatWindow::eventFilter(QObject *obj, QEvent *event)
+{
+    if (obj == m_inputEdit) {
+        // 跟踪输入法组合状态：Enter 仅在组合结束后发送
+        if (event->type() == QEvent::InputMethod) {
+            auto *imeEvent = static_cast<QInputMethodEvent *>(event);
+            m_imeComposing = !imeEvent->preeditString().isEmpty();
+            return false; // 让输入法继续处理
+        }
+        if (event->type() == QEvent::KeyPress) {
+            auto *keyEvent = static_cast<QKeyEvent *>(event);
+            if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter) {
+                if (!(keyEvent->modifiers() & Qt::ShiftModifier)) {
+                    if (m_imeComposing) {
+                        return false; // 输入法正在组合，Enter 用于提交候选词，不发送
+                    }
+                    onSendClicked();
+                    return true;
+                }
+            }
+        }
+    }
+    return QWidget::eventFilter(obj, event);
 }
 
 void ChatWindow::paintEvent(QPaintEvent *event)
@@ -301,8 +388,6 @@ void ChatWindow::paintEvent(QPaintEvent *event)
         const QSize winSize = rect().size();
 
         // ── ① 先垫一层深色底色 ──
-        //     让图片淡出时向深色过渡，而不是向 Widget 默认的白色过渡
-        //     这样 m_backgroundOpacity 调节才像真正的"透明度/昏暗"，而不是"褪色到白"
         const int darkBase = 24;
         painter.fillRect(rect(), QColor(darkBase, darkBase, darkBase));
 
@@ -327,21 +412,20 @@ void ChatWindow::paintEvent(QPaintEvent *event)
         painter.drawPixmap(rect(), scaled, sourceRect);
         painter.setOpacity(1.0);
     } else {
-        // 无背景图时保持默认浅色背景
         painter.fillRect(rect(), palette().window());
     }
 
-    // 让 QWidget 继续绘制子控件
     QWidget::paintEvent(event);
 }
 
 void ChatWindow::onSendClicked()
 {
-    const QString text = m_inputEdit->text().trimmed();
+    const QString text = m_inputEdit->toPlainText().trimmed();
     if (text.isEmpty()) return;
 
     appendUserMessage(text);
     m_inputEdit->clear();
+    m_inputEdit->setFixedHeight(36);
     emit userMessageSent(text);
 }
 
@@ -355,11 +439,11 @@ void ChatWindow::onFileClicked()
 
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        m_inputEdit->setText(QStringLiteral("（文件打开失败：%1）").arg(filePath));
+        m_inputEdit->setPlainText(QStringLiteral("（文件打开失败：%1）").arg(filePath));
         return;
     }
     if (file.size() > 512 * 1024) {
-        m_inputEdit->setText(QStringLiteral("（文件超过 512KB，请缩小后再试）"));
+        m_inputEdit->setPlainText(QStringLiteral("（文件超过 512KB，请缩小后再试）"));
         return;
     }
 
@@ -368,119 +452,313 @@ void ChatWindow::onFileClicked()
     const QString content = stream.readAll();
     file.close();
 
-    const QString existing = m_inputEdit->text();
+    const QString existing = m_inputEdit->toPlainText();
     if (existing.isEmpty()) {
-        m_inputEdit->setText(content);
+        m_inputEdit->setPlainText(content);
     } else {
-        m_inputEdit->setText(existing + QStringLiteral("\n") + content);
+        m_inputEdit->setPlainText(existing + QStringLiteral("\n") + content);
     }
     m_inputEdit->setFocus();
+}
+
+// ============================================================================
+// 消息控件创建
+// ============================================================================
+
+QWidget *ChatWindow::createUserMessageRow(const QString &text)
+{
+    auto *row = new QWidget(m_conversationContainer);
+    row->setObjectName(QStringLiteral("userMessageRow"));
+    auto *layout = new QHBoxLayout(row);
+    layout->setContentsMargins(12, 4, 12, 4);
+    layout->setSpacing(0);
+
+    const int maxBubbleW = m_scrollArea->viewport()
+        ? static_cast<int>(m_scrollArea->viewport()->width() * 0.75)
+        : 300;
+
+    auto *bubble = new QLabel(row);
+    bubble->setObjectName(QStringLiteral("userBubble"));
+    bubble->setWordWrap(true);
+    bubble->setTextFormat(Qt::PlainText);
+    bubble->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    bubble->setMaximumWidth(maxBubbleW);
+    // 无气泡背景，纯文字 — 旧版风格，系统主题自动穿透
+    bubble->setStyleSheet(QStringLiteral(
+        "QLabel { font-size: 15px; }"
+    ));
+    bubble->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+    bubble->setText(text);
+
+    layout->addStretch();
+    layout->addWidget(bubble);
+
+    return row;
+}
+
+QWidget *ChatWindow::createAssistantBlock(const QString &text)
+{
+    auto *block = new QWidget(m_conversationContainer);
+    block->setObjectName(QStringLiteral("assistantBlock"));
+    auto *hLayout = new QHBoxLayout(block);
+    hLayout->setContentsMargins(12, 4, 12, 4);
+    hLayout->setSpacing(0);
+
+    auto *inner = new QWidget(block);
+    auto *vLayout = new QVBoxLayout(inner);
+    vLayout->setContentsMargins(0, 0, 0, 0);
+    vLayout->setSpacing(2);
+
+    // 回复正文
+    auto *content = new QTextEdit(inner);
+    content->setObjectName(QStringLiteral("assistantContent"));
+    content->setReadOnly(true);
+    content->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    content->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    content->setStyleSheet(QStringLiteral(
+        "QTextEdit { background: transparent; border: none; padding: 0; "
+        "font-size: 15px; line-height: 1.8; }"
+    ));
+    content->document()->setDocumentMargin(0);
+
+    // 设置文字
+    content->setPlainText(text);
+
+    // 自动调整高度
+    connect(content->document(), &QTextDocument::contentsChanged, content, [content]() {
+        autoResizeTextEdit(content);
+    });
+    // 初始调整
+    QTimer::singleShot(0, content, [content]() {
+        autoResizeTextEdit(content);
+    });
+
+    vLayout->addWidget(content);
+
+    hLayout->addWidget(inner);
+    hLayout->addStretch();
+
+    return block;
+}
+
+QWidget *ChatWindow::createSystemMessageRow(const QString &text)
+{
+    auto *row = new QWidget(m_conversationContainer);
+    auto *layout = new QVBoxLayout(row);
+    layout->setContentsMargins(12, 4, 12, 4);
+    layout->setAlignment(Qt::AlignCenter);
+
+    auto *label = new QLabel(row);
+    label->setTextFormat(Qt::RichText);
+    label->setAlignment(Qt::AlignCenter);
+    label->setStyleSheet(QStringLiteral("color: gray; font-size: 13px; padding: 8px 0;"));
+    label->setWordWrap(true);
+
+    // 匹配原 appendSystemMessage 的居中样式
+    label->setText(QStringLiteral(
+        "<div style='text-align:center; margin:8px 0;'>"
+        "<span style='color:gray; font-size:13px;'>%1</span>"
+        "</div>"
+    ).arg(text.toHtmlEscaped()));
+
+    layout->addWidget(label);
+    return row;
 }
 
 // ============================================================================
 // 消息显示
 // ============================================================================
 
-void ChatWindow::appendFormattedLine(const QString &html, Qt::Alignment align)
-{
-    QTextCursor cursor = m_historyView->textCursor();
-    cursor.movePosition(QTextCursor::End);
-
-    QTextDocument *doc = m_historyView->document();
-    if (doc && !doc->isEmpty()) {
-        QTextBlockFormat sepFmt;
-        cursor.insertBlock(sepFmt);
-    }
-
-    cursor.insertHtml(html);
-
-    QTextBlockFormat msgFmt;
-    msgFmt.setAlignment(align);
-    msgFmt.setBottomMargin(30);
-    cursor.mergeBlockFormat(msgFmt);
-
-    QScrollBar *sb = m_historyView->verticalScrollBar();
-    sb->setValue(sb->maximum());
-}
-
-QString ChatWindow::buildAssistantBubble(const QString &, const QString &text)
-{
-    return QStringLiteral(
-        "<div style='font-size:15px; line-height:1.8; padding:2px 0;'>%1</div>"
-    ).arg(text.toHtmlEscaped());
-}
-
-QString ChatWindow::buildUserBubble(const QString &, const QString &text)
-{
-    return QStringLiteral(
-        "<div style='font-size:15px; line-height:1.8; padding:2px 0;'>%1</div>"
-    ).arg(text.toHtmlEscaped());
-}
-
 void ChatWindow::appendUserMessage(const QString &text)
 {
-    const QString time = QDateTime::currentDateTime().toString(QStringLiteral("HH:mm"));
-    appendFormattedLine(buildUserBubble(time, text), Qt::AlignRight);
+    // 切换到会话页（如果当前在搜索页）
+    if (m_messageStack->currentIndex() != 0) {
+        m_messageStack->setCurrentIndex(0);
+    }
+
+    QWidget *row = createUserMessageRow(text);
+    // 插入到底部伸缩项之前
+    m_messageListLayout->insertWidget(m_messageListLayout->count() - 1, row);
+
+    scrollToBottom();
 }
 
 void ChatWindow::appendAssistantMessage(const QString &text)
 {
-    const QString time = QDateTime::currentDateTime().toString(QStringLiteral("HH:mm"));
-    appendFormattedLine(buildAssistantBubble(time, text), Qt::AlignLeft);
-}
+    // 用于加载历史记录（非流式）
+    QWidget *block = createAssistantBlock(text);
+    m_messageListLayout->insertWidget(m_messageListLayout->count() - 1, block);
 
-void ChatWindow::updateAssistantMessage(const QString &text)
-{
-    QTextCursor cursor = m_historyView->textCursor();
-    cursor.movePosition(QTextCursor::End);
-
-    if (m_isStreaming) {
-        cursor.movePosition(QTextCursor::StartOfBlock, QTextCursor::KeepAnchor);
-        cursor.removeSelectedText();
-    } else {
-        QTextDocument *doc = m_historyView->document();
-        if (doc && !doc->isEmpty()) {
-            cursor.insertBlock(QTextBlockFormat(), QTextCharFormat());
-        }
-        m_isStreaming = true;
-    }
-
-    cursor.insertHtml(buildAssistantBubble(QString(), text));
-
-    QTextBlockFormat msgFmt;
-    msgFmt.setAlignment(Qt::AlignLeft);
-    msgFmt.setBottomMargin(30);
-    cursor.mergeBlockFormat(msgFmt);
-
-    QScrollBar *sb = m_historyView->verticalScrollBar();
-    sb->setValue(sb->maximum());
-}
-
-void ChatWindow::finishAssistantMessage()
-{
-    m_isStreaming = false;
+    scrollToBottom();
 }
 
 void ChatWindow::appendSystemMessage(const QString &text)
 {
-    appendFormattedLine(QStringLiteral(
-        "<div style='text-align:center; margin:8px 0;'>"
-        "<span style='color:gray; font-size:13px;'>%1</span>"
-        "</div>"
-    ).arg(text.toHtmlEscaped()), Qt::AlignCenter);
+    QWidget *row = createSystemMessageRow(text);
+    m_messageListLayout->insertWidget(m_messageListLayout->count() - 1, row);
+
+    scrollToBottom();
+}
+
+void ChatWindow::updateAssistantMessage(const QString &text)
+{
+    if (!m_isStreaming) {
+        // ── 首次流式更新：创建回复块 ──
+        m_messageStack->setCurrentIndex(0);
+
+        auto *block = new QWidget(m_conversationContainer);
+        block->setObjectName(QStringLiteral("assistantBlock"));
+        auto *hLayout = new QHBoxLayout(block);
+        hLayout->setContentsMargins(12, 4, 12, 4);
+        hLayout->setSpacing(0);
+
+        auto *inner = new QWidget(block);
+        auto *vLayout = new QVBoxLayout(inner);
+        vLayout->setContentsMargins(0, 0, 0, 0);
+        vLayout->setSpacing(2);
+
+        // 回复正文（初始为空，流式追加）
+        auto *content = new QTextEdit(inner);
+        content->setObjectName(QStringLiteral("assistantContent"));
+        content->setReadOnly(true);
+        content->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        content->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        content->setStyleSheet(QStringLiteral(
+            "QTextEdit { background: transparent; border: none; padding: 0; "
+            "font-size: 15px; line-height: 1.8; }"
+        ));
+        content->document()->setDocumentMargin(0);
+
+        // 自动调整高度
+        connect(content->document(), &QTextDocument::contentsChanged, content, [content]() {
+            autoResizeTextEdit(content);
+        });
+
+        vLayout->addWidget(content);
+
+        hLayout->addWidget(inner);
+        hLayout->addStretch();
+
+        // 插入到底部伸缩项之前
+        m_messageListLayout->insertWidget(m_messageListLayout->count() - 1, block);
+
+        // 记录当前 assistant 块
+        m_currentAssistant.container   = block;
+        m_currentAssistant.contentEdit = content;
+
+        m_isStreaming = true;
+        m_lastStreamingText.clear();
+
+        // 放入初始文字
+        if (!text.isEmpty()) {
+            m_currentAssistant.contentEdit->setPlainText(text);
+            m_lastStreamingText = text;
+        }
+
+        scrollToBottom();
+        return;
+    }
+
+    // ── 后续流式更新 ──
+    if (!m_currentAssistant.contentEdit) return;
+
+    // 传入完整累计文本
+    if (text.length() > m_lastStreamingText.length() && text.startsWith(m_lastStreamingText)) {
+        // 正常流式追加：只插入新增后缀
+        const QString delta = text.mid(m_lastStreamingText.length());
+        QTextCursor cursor(m_currentAssistant.contentEdit->document());
+        cursor.movePosition(QTextCursor::End);
+        cursor.insertText(delta);
+    } else if (text != m_lastStreamingText) {
+        // 回退/重试：以传入文本为权威，完整替换
+        m_currentAssistant.contentEdit->setPlainText(text);
+        QTextCursor cursor(m_currentAssistant.contentEdit->document());
+        cursor.movePosition(QTextCursor::End);
+    }
+    m_lastStreamingText = text;
+
+    scrollToBottom();
+}
+
+void ChatWindow::finishAssistantMessage()
+{
+    if (!m_isStreaming) return;
+
+    m_isStreaming = false;
+    m_currentAssistant = AssistantBlock{};
+    m_lastStreamingText.clear();
 }
 
 void ChatWindow::loadHistoryMessages(const QStringList &userOrAssistantRoles,
                                      const QStringList &contents)
 {
-    m_historyView->clear();
+    clearMessageWidgets();
+    m_isStreaming = false;
+    m_currentAssistant = AssistantBlock{};
+    m_lastStreamingText.clear();
+
     const int count = qMin(userOrAssistantRoles.size(), contents.size());
     for (int i = 0; i < count; ++i) {
         if (userOrAssistantRoles.at(i) == QStringLiteral("user")) {
-            appendUserMessage(contents.at(i));
+            QWidget *row = createUserMessageRow(contents.at(i));
+            m_messageListLayout->insertWidget(m_messageListLayout->count() - 1, row);
         } else {
-            appendAssistantMessage(contents.at(i));
+            QWidget *block = createAssistantBlock(contents.at(i));
+            m_messageListLayout->insertWidget(m_messageListLayout->count() - 1, block);
         }
+    }
+
+    QTimer::singleShot(0, this, &ChatWindow::scrollToBottom);
+}
+
+// ============================================================================
+// 布局辅助
+// ============================================================================
+
+void ChatWindow::scrollToBottom()
+{
+    QScrollBar *sb = m_scrollArea->verticalScrollBar();
+    if (sb) {
+        sb->setValue(sb->maximum());
+    }
+}
+
+void ChatWindow::adjustInputEditHeight()
+{
+    if (!m_inputEdit) return;
+
+    m_inputEdit->document()->setTextWidth(m_inputEdit->viewport()->width());
+    const int docHeight = static_cast<int>(m_inputEdit->document()->size().height());
+    const int frameH = m_inputEdit->frameWidth() * 2;
+    const int newHeight = qMax(36, qMin(docHeight + frameH + 4, 150));
+    m_inputEdit->setFixedHeight(newHeight);
+}
+
+void ChatWindow::updateBubbleMaxWidth()
+{
+    if (!m_scrollArea || !m_scrollArea->viewport()) return;
+    const int maxW = static_cast<int>(m_scrollArea->viewport()->width() * 0.75);
+
+    // 遍历所有消息行，更新用户气泡最大宽度
+    for (int i = 0; i < m_messageListLayout->count(); ++i) {
+        QLayoutItem *item = m_messageListLayout->itemAt(i);
+        if (!item || !item->widget()) continue;
+        auto *bubble = item->widget()->findChild<QLabel *>(QStringLiteral("userBubble"));
+        if (bubble) {
+            bubble->setMaximumWidth(maxW);
+        }
+    }
+}
+
+void ChatWindow::clearMessageWidgets()
+{
+    // 移除除底部伸缩项外的所有子控件
+    while (m_messageListLayout->count() > 1) {
+        QLayoutItem *item = m_messageListLayout->takeAt(0);
+        if (item->widget()) {
+            item->widget()->deleteLater();
+        }
+        delete item;
     }
 }
 
@@ -491,13 +769,12 @@ void ChatWindow::loadHistoryMessages(const QStringList &userOrAssistantRoles,
 void ChatWindow::onSearchToggled()
 {
     if (m_searchBar->isVisible()) {
-        // 收起：向下压缩到消失
+        // 收起：切换到会话页
         m_searchResults.clear();
         m_searchIndex = -1;
         m_searchCountLabel->setText(QStringLiteral("0/0"));
         m_searchPrevBtn->setEnabled(false);
         m_searchNextBtn->setEnabled(false);
-        clearSearchHighlight();
 
         auto *anim = new QPropertyAnimation(m_searchBar, "maximumHeight");
         anim->setDuration(180);
@@ -507,9 +784,12 @@ void ChatWindow::onSearchToggled()
         connect(anim, &QPropertyAnimation::finished, this, [this]() {
             m_searchBar->setVisible(false);
             m_searchBar->setMaximumHeight(QWIDGETSIZE_MAX);
-            // 恢复原始内容
+            // 切换回会话页并重新加载历史
+            m_messageStack->setCurrentIndex(0);
+            m_searchResultView->clear();
             if (m_memoryDb && !m_characterName.isEmpty()) {
-                const auto history = m_memoryDb->loadHistory(m_characterKey.isEmpty() ? m_characterName : m_characterKey, 200);
+                const auto history = m_memoryDb->loadHistory(
+                    m_characterKey.isEmpty() ? m_characterName : m_characterKey, 200);
                 QStringList roles, contents;
                 for (const auto &rec : history) {
                     roles.append(rec.role);
@@ -520,11 +800,14 @@ void ChatWindow::onSearchToggled()
         });
         anim->start(QAbstractAnimation::DeleteWhenStopped);
     } else {
-        // 展开：从 0 滑动到目标高度
+        // 展开
         m_searchBar->setMaximumHeight(0);
         m_searchBar->setVisible(true);
         m_searchBar->adjustSize();
         const int targetH = m_searchBar->sizeHint().height();
+
+        // 切换到搜索结果页
+        m_messageStack->setCurrentIndex(1);
 
         auto *anim = new QPropertyAnimation(m_searchBar, "maximumHeight");
         anim->setDuration(200);
@@ -552,7 +835,8 @@ void ChatWindow::doSearch()
         return;
     }
 
-    m_searchResults = m_memoryDb->searchMessages(keyword, m_characterKey.isEmpty() ? m_characterName : m_characterKey);
+    m_searchResults = m_memoryDb->searchMessages(
+        keyword, m_characterKey.isEmpty() ? m_characterName : m_characterKey);
     m_searchIndex = m_searchResults.isEmpty() ? -1 : 0;
 
     m_searchCountLabel->setText(QStringLiteral("%1/%2")
@@ -560,20 +844,21 @@ void ChatWindow::doSearch()
     m_searchPrevBtn->setEnabled(m_searchResults.size() > 1);
     m_searchNextBtn->setEnabled(m_searchResults.size() > 1);
 
-    // 显示搜索结果
     if (!m_searchResults.isEmpty()) {
         highlightSearchResult(0);
     } else {
-        clearSearchHighlight();
-        m_historyView->clear();
-        appendSystemMessage(QStringLiteral("没有找到包含「%1」的消息").arg(keyword));
+        m_searchResultView->clear();
+        // 使用系统消息样式在搜索页显示未找到
+        m_searchResultView->setHtml(QStringLiteral(
+            "<div style='text-align:center; margin-top:20px; color:gray; font-size:13px;'>"
+            "没有找到包含「%1」的消息</div>"
+        ).arg(keyword.toHtmlEscaped()));
     }
 }
 
 void ChatWindow::clearSearchHighlight()
 {
-    // 恢复 QTextEdit 背景
-    m_historyView->setExtraSelections({});
+    m_searchResultView->setExtraSelections({});
 }
 
 void ChatWindow::highlightSearchResult(int index)
@@ -582,30 +867,33 @@ void ChatWindow::highlightSearchResult(int index)
 
     const auto &rec = m_searchResults.at(index);
 
-    // 清除当前内容，只显示当前搜索结果及其上下文
-    m_historyView->clear();
+    m_searchResultView->clear();
 
-    // 显示结果提示
-    appendFormattedLine(QStringLiteral(
+    // 结果提示
+    m_searchResultView->append(QStringLiteral(
         "<div style='text-align:center; margin:6px 0;'>"
         "<span style='color:gray; font-size:12px;'>"
         "搜索结果 %1/%2  ——  匹配：%3"
         "</span></div>"
     ).arg(index + 1).arg(m_searchResults.size())
-     .arg(m_searchInput->text().toHtmlEscaped()), Qt::AlignCenter);
+     .arg(m_searchInput->text().toHtmlEscaped()));
 
-    // 显示角色标识
+    // 角色标识
     const QString roleLabel = (rec.role == QStringLiteral("user"))
         ? QStringLiteral("👤 你")
         : QStringLiteral("🎀 %1").arg(m_characterName);
-    const QString roleColor = (rec.role == QStringLiteral("user")) ? QStringLiteral("#4a90d9") : QStringLiteral("#d94a8e");
+    const QString roleColor = (rec.role == QStringLiteral("user"))
+        ? QStringLiteral("#4a90d9") : QStringLiteral("#d94a8e");
 
-    appendFormattedLine(QStringLiteral(
+    m_searchResultView->append(QStringLiteral(
         "<div style='font-size:12px; color:%2; margin-bottom:2px;'>%1</div>"
         "<div style='font-size:15px; line-height:1.8; padding:6px 10px; "
         "background:#fff3cd; border-radius:6px;'>%3</div>"
         "<div style='font-size:11px; color:gray; margin-top:2px;'>%4</div>"
-    ).arg(roleLabel, roleColor, rec.content.toHtmlEscaped(), rec.timestamp), Qt::AlignLeft);
+    ).arg(roleLabel, roleColor, rec.content.toHtmlEscaped(), rec.timestamp));
+
+    // 光标移动到顶部
+    m_searchResultView->moveCursor(QTextCursor::Start);
 
     // 更新计数
     m_searchIndex = index;
@@ -616,7 +904,6 @@ void ChatWindow::highlightSearchResult(int index)
 void ChatWindow::onSearchNext()
 {
     if (m_searchResults.isEmpty()) {
-        // 按回车触发搜索
         doSearch();
         return;
     }
@@ -748,7 +1035,8 @@ void ChatWindow::exportAsHtml(const QString &filePath)
     }
 
     QStringList bodyParts;
-    bodyParts << QStringLiteral("<h2 style='text-align:center; color:#333;'>与 %1 的聊天记录</h2>").arg(m_characterName.toHtmlEscaped());
+    bodyParts << QStringLiteral("<h2 style='text-align:center; color:#333;'>与 %1 的聊天记录</h2>")
+        .arg(m_characterName.toHtmlEscaped());
 
     for (const auto &rec : all) {
         const bool isUser = (rec.role == QStringLiteral("user"));
@@ -796,7 +1084,6 @@ void ChatWindow::exportAsHtml(const QString &filePath)
 
 void ChatWindow::onClearClicked()
 {
-    // 确认对话框
     const auto result = QMessageBox::question(
         this,
         QStringLiteral("清除聊天记录"),
@@ -806,13 +1093,13 @@ void ChatWindow::onClearClicked()
     );
     if (result != QMessageBox::Yes) return;
 
-    // 清空显示
-    m_historyView->clear();
+    clearMessageWidgets();
     m_searchResults.clear();
     m_searchIndex = -1;
     m_isStreaming = false;
+    m_currentAssistant = AssistantBlock{};
+    m_lastStreamingText.clear();
 
-    // 通知 App 层清除数据库和 Prompt 上下文
     emit clearRequested();
 }
 
@@ -835,7 +1122,7 @@ void ChatWindow::setBackgroundImage(const QString &filePath)
 
     m_backgroundImage = pixmap;
     m_backgroundImagePath = filePath;
-    m_backgroundSourcePath = filePath;   // 首次选择时原始路径 = 显示路径
+    m_backgroundSourcePath = filePath;
     update();
 
     QSettings settings(QStringLiteral("DesktopPet"), QStringLiteral("ChatWindow"));
@@ -876,8 +1163,6 @@ void ChatWindow::clearBackground()
     QSettings clrSettings(QStringLiteral("DesktopPet"), QStringLiteral("ChatWindow"));
     clrSettings.setValue(QStringLiteral("background/path"), QString());
     clrSettings.setValue(QStringLiteral("background/sourcePath"), QString());
-
-    qInfo() << "[ChatWindow] 已清除背景图";
 }
 
 void ChatWindow::setBackgroundOpacity(double opacity)
