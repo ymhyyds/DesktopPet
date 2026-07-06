@@ -679,7 +679,7 @@ QImage Live2DView::grabModelOnly()
     setUpdatesEnabled(true);
 
     m_screenshotMode = false;
-    update();
+    repaint();     // 同步重绘 → computeAndCacheHeadAnchor 以原始尺寸更新缓存
 
     if (img.isNull()) {
         // 回落：正常尺寸截图
