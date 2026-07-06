@@ -143,13 +143,12 @@ void PetWindow::setModelScale(double scale)
     m_live2DView->setModelScale(scale);
 
     if (m_tightModelWidth > 0.0 && m_tightModelHeight > 0.0) {
-        const double oldW = width();
-        const double oldH = height();
+        const int oldBottom = y() + height();
+        const int oldCenterX = x() + width() / 2;
         applyTightSize();
-        const double centerX = x() + oldW / 2.0;
-        const double centerY = y() + oldH / 2.0;
-        move(static_cast<int>(centerX - width() / 2.0),
-             static_cast<int>(centerY - height() / 2.0));
+        // 保持底部中心锚点：桌面宠物缩放时底部不动（脚部位置不变）
+        move(oldCenterX - width() / 2,
+             oldBottom - height());
     }
 
     saveState();
@@ -161,7 +160,25 @@ void PetWindow::applyTightSize()
 {
     if (m_tightModelWidth <= 0.0 || m_tightModelHeight <= 0.0) return;
 
-    const double aspect = m_tightModelWidth / m_tightModelHeight;
+    double tightW = m_tightModelWidth;
+    double tightH = m_tightModelHeight;
+
+    // ── 安全回退：极端的 tight bounds 宽高比 → 使用 Canvas 比例 ──
+    // 即使进行了 drawable 过滤，某些模型的设计仍可能产生极端比例的 tight bounds
+    // （如只有一个细长 drawable）。回退到 Canvas 比例能保证窗口形状合理。
+    if (m_canvasWidth > 0.0 && m_canvasHeight > 0.0) {
+        const double tightAspect = tightW / tightH;
+        const double canvasAspect = m_canvasWidth / m_canvasHeight;
+        // 允许最大 8:1 窄高或宽扁，超出则使用 Canvas 比例
+        constexpr double kMinAspect = 0.125;
+        constexpr double kMaxAspect = 8.0;
+        if (tightAspect < kMinAspect || tightAspect > kMaxAspect) {
+            tightW = m_canvasWidth;
+            tightH = m_canvasHeight;
+        }
+    }
+
+    const double aspect = tightW / tightH;
     const int basePx = qRound(kBaseSize * m_currentModelScale);
 
     // ★ 不跨模型归一化：每个模型用自己 idle 稳定后的 tight bounds

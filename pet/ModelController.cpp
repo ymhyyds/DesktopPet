@@ -17,6 +17,7 @@
 #include "MouseActionManager.hpp"
 
 #include "ModelController.hpp"
+#include "../interaction/DrawableBounds.h"
 
 #include "Motion/CubismBreathUpdater.hpp"
 #include "Motion/CubismLookUpdater.hpp"
@@ -856,35 +857,66 @@ void ModelController::getModelBounds(double &outMinX, double &outMinY,
         return;
     }
 
-    float minX =  FLT_MAX, minY =  FLT_MAX;
-    float maxX = -FLT_MAX, maxY = -FLT_MAX;
+    float mnX = FLT_MAX, mnY = FLT_MAX;
+    float mxX = -FLT_MAX, mxY = -FLT_MAX;
+    int acceptedDrawables = 0;
 
     for (Csm::csmInt32 i = 0; i < drawableCount; i++)
     {
+        // ── 过滤器 ──
+        // 跳过动态不可见的 Drawable（粒子、特效等）
+        if (!_model->GetDrawableDynamicFlagIsVisible(i))
+            continue;
+        // 跳过透明度近乎 0 的 Drawable（完全透明 → 排除）
+        if (_model->GetDrawableOpacity(i) < 0.01f)
+            continue;
+
         const auto* vertices = _model->GetDrawableVertexPositions(i);
         const Csm::csmInt32 vertexCount = _model->GetDrawableVertexCount(i);
 
+        // 使用共享的纯函数计算单个 Drawable 的 AABB
+        // 内部处理：count < 3、NaN/Inf、退化包围盒
+        float dMnX = FLT_MAX, dMnY = FLT_MAX;
+        float dMxX = -FLT_MAX, dMxY = -FLT_MAX;
+        int validVerts = 0;
+
         for (Csm::csmInt32 v = 0; v < vertexCount; v++)
         {
-            const float vx = vertices[v].X;
-            const float vy = vertices[v].Y;
-            if (vx < minX) minX = vx;
-            if (vy < minY) minY = vy;
-            if (vx > maxX) maxX = vx;
-            if (vy > maxY) maxY = vy;
+            DrawableBounds::AccumulateVertex(
+                vertices[v].X, vertices[v].Y,
+                dMnX, dMnY, dMxX, dMxY, validVerts);
         }
+
+        if (!DrawableBounds::FinalizeDrawable(dMnX, dMnY, dMxX, dMxY, validVerts))
+            continue;
+
+        // 合并到总体 bounds
+        if (dMnX < mnX) mnX = dMnX;
+        if (dMnY < mnY) mnY = dMnY;
+        if (dMxX > mxX) mxX = dMxX;
+        if (dMxY > mxY) mxY = dMxY;
+        ++acceptedDrawables;
     }
 
-    outMinX   = static_cast<double>(minX);
-    outMinY   = static_cast<double>(minY);
-    outWidth  = static_cast<double>(maxX - minX);
-    outHeight = static_cast<double>(maxY - minY);
+    if (acceptedDrawables == 0)
+    {
+        // 无有效 Drawable → 回退到画布尺寸
+        outMinX = 0.0;
+        outMinY = 0.0;
+        outWidth  = static_cast<double>(_model->GetCanvasWidth());
+        outHeight = static_cast<double>(_model->GetCanvasHeight());
+        return;
+    }
 
-    // 安全检查：如果计算结果异常（所有顶点重合等），回退到画布尺寸
+    outMinX   = static_cast<double>(mnX);
+    outMinY   = static_cast<double>(mnY);
+    outWidth  = static_cast<double>(mxX - mnX);
+    outHeight = static_cast<double>(mxY - mnY);
+
+    // 最终安全检查
     if (outWidth <= 0.0 || outHeight <= 0.0)
     {
-        outMinX   = 0.0;
-        outMinY   = 0.0;
+        outMinX = outMinY = 0.0;
         outWidth  = static_cast<double>(_model->GetCanvasWidth());
         outHeight = static_cast<double>(_model->GetCanvasHeight());
     }

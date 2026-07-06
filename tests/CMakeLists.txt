@@ -115,3 +115,58 @@ add_test(NAME test_bedtime
     COMMAND test_bedtime
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# ── Drag Anchor Unit Tests ─────────────────────────────────────────────────
+# Pure-function tests for coordinate calculation (no mock server, no App deps).
+
+add_executable(test_drag_anchor
+    ${CMAKE_CURRENT_SOURCE_DIR}/DragAnchorTest.cpp
+)
+
+set_target_properties(test_drag_anchor PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_drag_anchor PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/interaction
+)
+
+target_link_libraries(test_drag_anchor PRIVATE
+    Qt6::Test
+    Qt6::Core
+    Qt6::Gui
+)
+
+add_test(NAME test_drag_anchor
+    COMMAND test_drag_anchor
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+# ── Drawable Bounds Unit Tests ────────────────────────────────────────────
+# Pure-function tests for drawable AABB filtering (NaN/Inf/degenerate).
+# No Cubism SDK, no OpenGL, no mock server dependencies.
+
+add_executable(test_drawable_bounds
+    ${CMAKE_CURRENT_SOURCE_DIR}/DrawableBoundsTest.cpp
+)
+
+set_target_properties(test_drawable_bounds PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_drawable_bounds PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/interaction
+)
+
+target_link_libraries(test_drawable_bounds PRIVATE
+    Qt6::Test
+    Qt6::Core
+    Qt6::Gui
+)
+
+add_test(NAME test_drawable_bounds
+    COMMAND test_drawable_bounds
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)

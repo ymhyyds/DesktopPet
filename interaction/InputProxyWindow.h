@@ -62,7 +62,8 @@ private:
 
     // ── 拖拽 ──
     bool   m_dragging = false;
-    QPoint m_dragStartOffset;
+    /// 相对于 PetWindow 左上角的拖动锚点（一次拖动期间不变）
+    QPoint m_dragAnchorInPet;
 
     // ── 命中检测（头部/身体） ──
     bool   m_pressInHeadArea = false;
@@ -80,6 +81,12 @@ private:
     int m_geoOffsetX = 0;
     int m_geoOffsetY = 0;
 
+    // ── syncGeometry 重入保护 ──
+    bool m_syncingGeometry = false;
+
     static constexpr int kMaskPaddingPx = 4;
     static constexpr int kDragThreshold  = 6;
+
 };
+
+#include "DragAnchorHelpers.h"

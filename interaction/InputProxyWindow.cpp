@@ -14,6 +14,7 @@
 #include <QScreen>
 #include <QDebug>
 #include <QVector>
+#include <QScopedValueRollback>
 
 // ============================================================================
 // 构造 / 析构
@@ -56,9 +57,9 @@ InputProxyWindow::~InputProxyWindow()
 
 bool InputProxyWindow::eventFilter(QObject *watched, QEvent *event)
 {
-    // ── (A) PetWindow move 跟踪 — 自动同步 geometry ──
+    // ── (A) PetWindow move/resize 跟踪 — 自动同步 geometry ──
     if (watched == m_petWindow) {
-        if (event->type() == QEvent::Move) {
+        if (event->type() == QEvent::Move || event->type() == QEvent::Resize) {
             syncGeometry();
         }
         return false;   // 不吞事件，PetWindow 正常处理
@@ -122,60 +123,60 @@ bool InputProxyWindow::eventFilter(QObject *watched, QEvent *event)
 
 void InputProxyWindow::syncGeometry()
 {
+    // ── 重入保护 ──
+    if (m_syncingGeometry) return;
+    QScopedValueRollback<bool> guard(m_syncingGeometry, true);
+
     if (!m_petWindow) return;
 
     const QRect petGeo = m_petWindow->geometry();
 
-    // 默认：InputProxyWindow geometry = PetWindow geometry
-    QRect proxyGeo = petGeo;
+    // ── 记录旧状态（用于统一判断是否需要刷新 mask） ──
+    const int oldOffsetX = m_geoOffsetX;
+    const int oldOffsetY = m_geoOffsetY;
+    const QSize oldSize = size();
 
-    // 如果 PetWindow 超出显示器可用区域，裁剪到可用区域并修正 mask 坐标偏移
-    {
-        QScreen *screen = QGuiApplication::screenAt(petGeo.center());
-        if (screen) {
-            const QRect available = screen->availableGeometry();
-            const QRect intersected = petGeo.intersected(available);
-            if (intersected.isValid() && intersected != petGeo) {
-                // 计算偏移量：PetWindow origin → 裁剪后 origin
-                m_geoOffsetX = intersected.x() - petGeo.x();
-                m_geoOffsetY = intersected.y() - petGeo.y();
-                proxyGeo = intersected;
-            } else {
-                m_geoOffsetX = 0;
-                m_geoOffsetY = 0;
-            }
-        }
+    // ── m_geoOffset 始终为 0 ──
+    // proxy geometry == PetWindow geometry，proxy-local 原点始终与 PetWindow-local 一致
+    // 不再使用 availableGeometry 裁剪，避免可见模型区域失去交互覆盖
+    if (m_geoOffsetX != 0 || m_geoOffsetY != 0) {
+        m_geoOffsetX = 0;
+        m_geoOffsetY = 0;
     }
 
-    // 多显示器支持：如果窗口中心不在任何屏幕上，尝试 fallback 到主屏幕
-    if (!QGuiApplication::screenAt(proxyGeo.center())) {
+    // ── 多显示器兜底：窗口中心不在任何屏幕上 → 移到主屏幕 ──
+    // 仅在极少数窗口完全离屏时触发，不影响正常边缘位置
+    if (!QGuiApplication::screenAt(petGeo.center())) {
         QScreen *primary = QGuiApplication::primaryScreen();
         if (primary) {
-            const QRect primaryGeo = primary->availableGeometry();
-            int cx = qBound(primaryGeo.left(), proxyGeo.left(),
-                            primaryGeo.right() - qMin(proxyGeo.width(), primaryGeo.width()));
-            int cy = qBound(primaryGeo.top(), proxyGeo.top(),
-                            primaryGeo.bottom() - qMin(proxyGeo.height(), primaryGeo.height()));
-            m_geoOffsetX = cx - petGeo.x();
-            m_geoOffsetY = cy - petGeo.y();
-            proxyGeo.moveTopLeft(QPoint(cx, cy));
+            const QRect primaryScreen = primary->geometry();  // 完整屏幕区域
+            int cx = qBound(primaryScreen.left(), petGeo.left(),
+                            primaryScreen.right() - qMin(petGeo.width(), primaryScreen.width()));
+            int cy = qBound(primaryScreen.top(), petGeo.top(),
+                            primaryScreen.bottom() - qMin(petGeo.height(), primaryScreen.height()));
+            setGeometry(QRect(QPoint(cx, cy), petGeo.size()));
+        } else {
+            setGeometry(petGeo);
         }
+    } else {
+        // ── 窗口中心在某个屏幕上 → proxy 完整跟随 PetWindow ──
+        // 超出屏幕边缘的部分由 OS 自动裁剪输入，不需手动缩小 proxy
+        setGeometry(petGeo);
     }
 
-    // ── 无有效屏幕交集 → 暂时隐藏 proxy ──
-    if (!QGuiApplication::screenAt(proxyGeo.center())) {
-        if (isVisible())
-            hide();
-        return;
-    }
-
-    // ── geometry 有效 → 应用 ──
-    setGeometry(proxyGeo);
-
-    // geometry 恢复有效 → 重新显示 proxy
+    // ── 若之前因离屏隐藏，现在重新显示 ──
     if (!isVisible()) {
         show();
         raise();
+    }
+
+    // ── 统一判断：geometry/offset 变化 → 刷新 mask ──
+    // 拖动分支和非拖动分支都汇聚于此，由同一条件控制
+    if (NeedsMaskRefresh(oldOffsetX, oldOffsetY,
+                          m_geoOffsetX, m_geoOffsetY,
+                          oldSize, size()))
+    {
+        updateInputMask();
     }
 }
 
@@ -200,12 +201,12 @@ void InputProxyWindow::updateInputMask()
     }
 
     // 2. 构建多矩形 QRegion：每个 Drawable AABB + 4px padding
-    //    坐标从 PetWindow 本地 → InputProxyWindow 本地（考虑几何裁剪偏移）
+    //    Proxy 与 PetWindow geometry 完全一致，无需坐标转换
+    //    超出 proxy 边界的部分在步骤 3 中被 intersected 裁剪
     QRegion preciseRegion;
     for (const QRect &rect : drawableRects) {
         QRect r = rect.adjusted(-kMaskPaddingPx, -kMaskPaddingPx,
                                  kMaskPaddingPx, kMaskPaddingPx);
-        r.translate(-m_geoOffsetX, -m_geoOffsetY);   // PetWindow local → proxy local
         preciseRegion |= QRegion(r);
     }
 
@@ -235,6 +236,14 @@ void InputProxyWindow::updateInputMask()
     setMask(preciseRegion);
     m_preciseRegion = preciseRegion;
     m_preciseRegionValid = true;
+
+#ifndef QT_NO_DEBUG
+    qDebug() << "[InputProxy] updateInputMask"
+             << "drawableCount=" << drawableRects.size()
+             << "proxySize=" << size()
+             << "firstDrawableRect=" << drawableRects.first()
+             << "maskBB=" << preciseRegion.boundingRect();
+#endif
 }
 
 // ============================================================================
@@ -256,18 +265,27 @@ void InputProxyWindow::mousePressEvent(QMouseEvent *event)
     }
 
     // Hit-area 细分（头部/身体）
+    // Proxy-local == PetWindow-local，直接使用 event position
     const float px = static_cast<float>(event->position().x());
     const float py = static_cast<float>(event->position().y());
-    const float petPx = px + m_geoOffsetX;
-    const float petPy = py + m_geoOffsetY;
     bool isHead = false;
-    m_live2DView->hitTestAt(petPx, petPy, isHead);
-    bool alphaOk = m_live2DView->alphaTestAt(petPx, petPy);
+    m_live2DView->hitTestAt(px, py, isHead);
+    bool alphaOk = m_live2DView->alphaTestAt(px, py);
     m_pressInHeadArea = alphaOk && isHead;
     m_pressInBodyArea = alphaOk && !isHead;
 
-    // 记录拖拽起始偏移 — 不立即设 m_dragging，需 mouseMove 超阈值后才拖拽
-    m_dragStartOffset = event->pos();
+    // 记录拖拽起始偏移（PetWindow 本地坐标，一次拖动期间不变）
+    // Proxy-local == PetWindow-local，无需 geoOffset 转换
+    {
+        m_dragAnchorInPet = event->position().toPoint();
+#ifndef QT_NO_DEBUG
+        qDebug() << "[InputProxy] mousePress"
+                 << "petGeo=" << (m_petWindow ? m_petWindow->geometry() : QRect())
+                 << "proxyGeo=" << geometry()
+                 << "proxyLocal=" << event->position().toPoint()
+                 << "anchorInPet=" << m_dragAnchorInPet;
+#endif
+    }
     m_pressStartPos = event->pos();
 }
 
@@ -369,8 +387,9 @@ bool InputProxyWindow::isInteractivePoint(const QPointF &proxyLocalPos)
         return false;
 
     // (2) 模型内容：必须命中交互区域（HitArea / tight bounds）
-    const float petPx = static_cast<float>(pt.x()) + static_cast<float>(m_geoOffsetX);
-    const float petPy = static_cast<float>(pt.y()) + static_cast<float>(m_geoOffsetY);
+    //    Proxy-local == PetWindow-local，无需 geoOffset 转换
+    const float petPx = static_cast<float>(pt.x());
+    const float petPy = static_cast<float>(pt.y());
     bool isHead = false;
     if (!m_live2DView || !m_live2DView->hitTestAt(petPx, petPy, isHead))
         return false;
@@ -384,14 +403,23 @@ bool InputProxyWindow::isInteractivePoint(const QPointF &proxyLocalPos)
 
 void InputProxyWindow::handleDragMove(QMouseEvent *event)
 {
-    const QPoint newGlobal = event->globalPosition().toPoint() - m_dragStartOffset;
+    const QPoint newPetTopLeft = ComputeNewPosition(
+        event->globalPosition().toPoint(), m_dragAnchorInPet);
 
-    // PetWindow 优先移动 — InputProxyWindow 始终跟随 PetWindow，不自发移动
+#ifndef QT_NO_DEBUG
+    qDebug() << "[InputProxy] dragMove"
+             << "globalMouse=" << event->globalPosition().toPoint()
+             << "anchorInPet=" << m_dragAnchorInPet
+             << "newTopLeft=" << newPetTopLeft
+             << "oldTopLeft=" << (m_petWindow ? m_petWindow->pos() : pos());
+#endif
+
     if (m_petWindow) {
-        m_petWindow->move(newGlobal);
+        m_petWindow->move(newPetTopLeft);
+        // 拖动期间 proxy 跟随 PetWindow 完整 geometry
         setGeometry(m_petWindow->geometry());
     } else {
-        move(newGlobal);
+        move(newPetTopLeft);
     }
 }
 

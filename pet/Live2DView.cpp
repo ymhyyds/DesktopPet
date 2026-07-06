@@ -13,6 +13,7 @@
 #include "MouseActionManager.hpp"
 
 #include "PetWindow.h"
+#include "../interaction/DrawableBounds.h"
 
 #include <QTimer>
 #include <QDebug>
@@ -1370,19 +1371,20 @@ void Live2DView::getVisibleDrawableRects(QVector<QRect> &outRects) const
         const int vertexCount = model->GetDrawableVertexCount(i);
         if (vertexCount < 3) continue;
 
-        // 遍历顶点求紧贴包围盒（画布坐标系 Y-up）
-        float dMinX = vertices[0].X, dMaxX = vertices[0].X;
-        float dMinY = vertices[0].Y, dMaxY = vertices[0].Y;
-        for (int j = 1; j < vertexCount; ++j) {
-            dMinX = qMin(dMinX, vertices[j].X);
-            dMaxX = qMax(dMaxX, vertices[j].X);
-            dMinY = qMin(dMinY, vertices[j].Y);
-            dMaxY = qMax(dMaxY, vertices[j].Y);
+        // 遍历顶点求紧贴包围盒（画布坐标系 Y-up），使用共享纯函数处理 NaN/Inf
+        float dMinX = FLT_MAX, dMaxX = -FLT_MAX;
+        float dMinY = FLT_MAX, dMaxY = -FLT_MAX;
+        int validVerts = 0;
+        for (int j = 0; j < vertexCount; ++j) {
+            DrawableBounds::AccumulateVertex(
+                vertices[j].X, vertices[j].Y,
+                dMinX, dMinY, dMaxX, dMaxY, validVerts);
         }
+        if (!DrawableBounds::FinalizeDrawable(dMinX, dMinY, dMaxX, dMaxY, validVerts))
+            continue;
 
         const float drawW = dMaxX - dMinX;
         const float drawH = dMaxY - dMinY;
-        if (drawW < 0.001f || drawH < 0.001f) continue;
 
         // 画布坐标 → 像素坐标（与 computeModelArea 的投影链一致）
         // 归一化 → 映射到画布像素区域
