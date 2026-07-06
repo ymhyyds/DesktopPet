@@ -6,12 +6,13 @@
 #include <QMouseEvent>
 #include <QContextMenuEvent>
 #include <QHideEvent>
+#include <QMoveEvent>
+#include <QResizeEvent>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QApplication>
 #include <QCoreApplication>
 #include <QGuiApplication>
-#include <QScreen>
 #include <QDebug>
 #include <QVector>
 #include <QScopedValueRollback>
@@ -43,6 +44,9 @@ InputProxyWindow::InputProxyWindow(PetWindow *petWindow, Live2DView *live2DView,
     // ★ 跟踪 PetWindow 的 moveEvent — 确保 InputProxyWindow 始终跟随其 geometry
     if (m_petWindow)
         m_petWindow->installEventFilter(this);
+
+    // 初始 mask
+    updateInputMask();
 }
 
 InputProxyWindow::~InputProxyWindow()
@@ -79,10 +83,32 @@ bool InputProxyWindow::eventFilter(QObject *watched, QEvent *event)
     // ── (C) 本窗口事件 ──
 
     if (event->type() == QEvent::WindowDeactivate) {
+#ifndef QT_NO_DEBUG
+        qDebug() << "[InputProxy::eventFilter] WindowDeactivate — cleanupDrag"
+                 << "m_dragging=" << m_dragging
+                 << "grabber=" << QWidget::mouseGrabber();
+#endif
         cleanupDrag();
     }
 
-    // ── (D) 命中测试守卫 — 统一通过 isInteractivePoint 拦截非交互点击 ──
+    // ── (C2) UngrabMouse — 拖动期间意外失去 capture 时重新获取 ──
+    if (event->type() == QEvent::UngrabMouse) {
+#ifndef QT_NO_DEBUG
+        qDebug() << "[InputProxy::eventFilter] UngrabMouse"
+                 << "m_dragging=" << m_dragging
+                 << "buttons=" << (QGuiApplication::mouseButtons() & Qt::LeftButton ? "LEFT" : "none");
+#endif
+        if (m_dragging && (QGuiApplication::mouseButtons() & Qt::LeftButton)) {
+            // ★ 必须同时检查物理左键状态：
+            //   用户释放按钮时 Qt 也会先发 UngrabMouse（早于 MouseButtonRelease），
+            //   此时 m_dragging 仍为 true，但左键已松开，不应 re-grab。
+            //   只有物理左键仍按下时的 grab 丢失（如 setGeometry 移动窗口）才需要重取。
+            grabMouse();
+            return true;
+        }
+    }
+
+    // ── (D) 命中测试守卫 — 统一通过 isInteractivePetPoint 拦截非交互点击 ──
     //  只有 preciseRegion.contains + hitTestAt + alphaTestAt 全部通过才放行。
     //  return true 只阻止 Qt 事件循环内继续派发（不涉及跨进程穿透），
     //  跨进程穿透已由 OS 级 setMask(preciseRegion) 处理。
@@ -94,17 +120,28 @@ bool InputProxyWindow::eventFilter(QObject *watched, QEvent *event)
     case QEvent::MouseButtonDblClick:
     case QEvent::ContextMenu:
     {
-        QPointF localPos;
+        QPoint globalPos;
         if (event->type() == QEvent::ContextMenu) {
             auto *ce = static_cast<QContextMenuEvent *>(event);
-            localPos = QPointF(ce->pos());
+            globalPos = ce->globalPos();
         } else {
             auto *me = static_cast<QMouseEvent *>(event);
-            localPos = me->position();
+            globalPos = me->globalPosition().toPoint();
         }
 
-        if (!isInteractivePoint(localPos)) {
+        const QPoint petLocal = m_petWindow->mapFromGlobal(globalPos);
+        if (!isInteractivePetPoint(petLocal)) {
             // 未命中交互点 → 清理 pending 状态并阻止事件派发
+#ifndef QT_NO_DEBUG
+            const bool isRelease = (event->type() == QEvent::MouseButtonRelease);
+            qDebug() << "[InputProxy::eventFilter] 非交互点击被拦截"
+                     << "type=" << event->type()
+                     << "globalPos=" << globalPos
+                     << "petLocal=" << petLocal
+                     << "m_dragging=" << m_dragging
+                     << (isRelease ? "[RELEASE swallowed — cleanupDrag in filter]" : "")
+                     << "grabber=" << QWidget::mouseGrabber();
+#endif
             cleanupDrag();
             return true;
         }
@@ -130,39 +167,29 @@ void InputProxyWindow::syncGeometry()
     if (!m_petWindow) return;
 
     const QRect petGeo = m_petWindow->geometry();
-
-    // ── 记录旧状态（用于统一判断是否需要刷新 mask） ──
-    const int oldOffsetX = m_geoOffsetX;
-    const int oldOffsetY = m_geoOffsetY;
     const QSize oldSize = size();
+    const QRect oldGeo = geometry();
 
-    // ── m_geoOffset 始终为 0 ──
-    // proxy geometry == PetWindow geometry，proxy-local 原点始终与 PetWindow-local 一致
-    // 不再使用 availableGeometry 裁剪，避免可见模型区域失去交互覆盖
-    if (m_geoOffsetX != 0 || m_geoOffsetY != 0) {
-        m_geoOffsetX = 0;
-        m_geoOffsetY = 0;
-    }
+    // ── Proxy geometry 始终与 PetWindow 完全一致 ──
+    // 允许 x/y 为负数，允许 right/bottom 超出屏幕。
+    // 不根据 screenAt / availableGeometry / screenGeometry 裁剪或移动 Proxy。
+    // 超出屏幕的部分由 OS 自然裁剪输入可见性，不影响模型可见区域的输入覆盖。
+    setGeometry(petGeo);
 
-    // ── 多显示器兜底：窗口中心不在任何屏幕上 → 移到主屏幕 ──
-    // 仅在极少数窗口完全离屏时触发，不影响正常边缘位置
-    if (!QGuiApplication::screenAt(petGeo.center())) {
-        QScreen *primary = QGuiApplication::primaryScreen();
-        if (primary) {
-            const QRect primaryScreen = primary->geometry();  // 完整屏幕区域
-            int cx = qBound(primaryScreen.left(), petGeo.left(),
-                            primaryScreen.right() - qMin(petGeo.width(), primaryScreen.width()));
-            int cy = qBound(primaryScreen.top(), petGeo.top(),
-                            primaryScreen.bottom() - qMin(petGeo.height(), primaryScreen.height()));
-            setGeometry(QRect(QPoint(cx, cy), petGeo.size()));
-        } else {
-            setGeometry(petGeo);
-        }
-    } else {
-        // ── 窗口中心在某个屏幕上 → proxy 完整跟随 PetWindow ──
-        // 超出屏幕边缘的部分由 OS 自动裁剪输入，不需手动缩小 proxy
-        setGeometry(petGeo);
+    const QRect actualProxyGeo = geometry();
+
+#ifndef QT_NO_DEBUG
+    if (oldGeo != petGeo || actualProxyGeo != petGeo) {
+        qDebug() << "[InputProxy::syncGeometry]"
+                 << "petGeo=" << petGeo
+                 << "oldProxy=" << oldGeo
+                 << "requested=" << petGeo
+                 << "actualProxy=" << actualProxyGeo
+                 << "adjusted=" << (actualProxyGeo != petGeo ? "YES Qt adjusted" : "no")
+                 << "oldSize=" << oldSize
+                 << "m_dragging=" << m_dragging;
     }
+#endif
 
     // ── 若之前因离屏隐藏，现在重新显示 ──
     if (!isVisible()) {
@@ -170,12 +197,8 @@ void InputProxyWindow::syncGeometry()
         raise();
     }
 
-    // ── 统一判断：geometry/offset 变化 → 刷新 mask ──
-    // 拖动分支和非拖动分支都汇聚于此，由同一条件控制
-    if (NeedsMaskRefresh(oldOffsetX, oldOffsetY,
-                          m_geoOffsetX, m_geoOffsetY,
-                          oldSize, size()))
-    {
+    // ── geometry 变化 → 刷新 mask ──
+    if (oldSize != size()) {
         updateInputMask();
     }
 }
@@ -186,8 +209,7 @@ void InputProxyWindow::syncGeometry()
 
 void InputProxyWindow::updateInputMask()
 {
-    if (!m_live2DView) {
-        // 无模型 → 保留上一次有效的 preciseRegion，不清除 mask
+    if (!m_live2DView || !m_petWindow) {
         return;
     }
 
@@ -196,30 +218,40 @@ void InputProxyWindow::updateInputMask()
     m_live2DView->getVisibleDrawableRects(drawableRects);
 
     if (drawableRects.isEmpty()) {
-        // 无可见 drawable → 保留上一次有效的 preciseRegion
         return;
     }
 
-    // 2. 构建多矩形 QRegion：每个 Drawable AABB + 4px padding
-    //    Proxy 与 PetWindow geometry 完全一致，无需坐标转换
-    //    超出 proxy 边界的部分在步骤 3 中被 intersected 裁剪
-    QRegion preciseRegion;
+    // 2. 构建规范 PetWindow-local region（不被裁剪、不被平移）
+    QRegion canonicalPetRegion;
     for (const QRect &rect : drawableRects) {
         QRect r = rect.adjusted(-kMaskPaddingPx, -kMaskPaddingPx,
                                  kMaskPaddingPx, kMaskPaddingPx);
-        preciseRegion |= QRegion(r);
+        canonicalPetRegion |= QRegion(r);
     }
 
-    // 3. 约束到 InputProxyWindow 边界
-    preciseRegion = preciseRegion.intersected(QRect(0, 0, width(), height()));
+    // 3. 读取实时 geometry（每次调用重新读取）
+    const QRect petGeo = m_petWindow->geometry();
+    const QRect actualProxyGeo = geometry();
+    const bool isClipped = (petGeo != actualProxyGeo);
 
-    if (preciseRegion.isEmpty()) {
-        // 裁剪后为空 → 保留上一次有效的 preciseRegion
+#ifndef QT_NO_DEBUG
+    if (isClipped) {
+        qDebug() << "[InputProxy::updateInputMask]"
+                 << "isClipped=" << (isClipped ? "YES" : "no")
+                 << "petGeo=" << petGeo
+                 << "proxyGeo=" << actualProxyGeo;
+    }
+#endif
+
+    // 4. 从 canonical region 推导 proxy-local mask
+    QRegion proxyMask = DeriveProxyMask(canonicalPetRegion, petGeo, actualProxyGeo);
+
+    if (proxyMask.isEmpty()) {
         return;
     }
 
-    // 4. 全窗口 → 清除 mask（罕见情况）
-    if (preciseRegion == QRegion(QRect(0, 0, width(), height()))) {
+    // 5. 全窗口 → 清除 mask
+    if (proxyMask == QRegion(QRect(QPoint(0, 0), actualProxyGeo.size()))) {
         if (m_preciseRegionValid) {
             clearMask();
             m_preciseRegionValid = false;
@@ -227,22 +259,22 @@ void InputProxyWindow::updateInputMask()
         return;
     }
 
-    // 5. 防重复：相同 region 跳过
-    if (m_preciseRegionValid && m_preciseRegion == preciseRegion) {
+    // 6. 防重复
+    if (m_preciseRegionValid && m_preciseRegion == proxyMask) {
         return;
     }
 
-    // 6. 应用 mask
-    setMask(preciseRegion);
-    m_preciseRegion = preciseRegion;
+    // 7. 应用 mask
+    setMask(proxyMask);
+    m_preciseRegion = proxyMask;
     m_preciseRegionValid = true;
 
 #ifndef QT_NO_DEBUG
     qDebug() << "[InputProxy] updateInputMask"
              << "drawableCount=" << drawableRects.size()
-             << "proxySize=" << size()
-             << "firstDrawableRect=" << drawableRects.first()
-             << "maskBB=" << preciseRegion.boundingRect();
+             << "petGeo=" << petGeo
+             << "proxyGeo=" << actualProxyGeo
+             << "maskBB=" << proxyMask.boundingRect();
 #endif
 }
 
@@ -252,41 +284,44 @@ void InputProxyWindow::updateInputMask()
 
 void InputProxyWindow::mousePressEvent(QMouseEvent *event)
 {
+    const QPoint globalPos = event->globalPosition().toPoint();
+
     // 只处理左键
     if (event->button() != Qt::LeftButton) {
         QWidget::mousePressEvent(event);
         return;
     }
 
+    // ── 统一坐标：global → PetWindow-local ──
+    const QPoint petLocal = m_petWindow->mapFromGlobal(globalPos);
+
     // 统一命中检测 — eventFilter 已拦截非交互点，此 checks 为兜底
-    if (!isInteractivePoint(event->position())) {
+    if (!isInteractivePetPoint(petLocal)) {
         event->ignore();
         return;
     }
 
-    // Hit-area 细分（头部/身体）
-    // Proxy-local == PetWindow-local，直接使用 event position
-    const float px = static_cast<float>(event->position().x());
-    const float py = static_cast<float>(event->position().y());
+    // Hit-area 细分（头部/身体），使用 PetWindow-local 坐标
+    const float px = static_cast<float>(petLocal.x());
+    const float py = static_cast<float>(petLocal.y());
     bool isHead = false;
     m_live2DView->hitTestAt(px, py, isHead);
     bool alphaOk = m_live2DView->alphaTestAt(px, py);
     m_pressInHeadArea = alphaOk && isHead;
     m_pressInBodyArea = alphaOk && !isHead;
 
-    // 记录拖拽起始偏移（PetWindow 本地坐标，一次拖动期间不变）
-    // Proxy-local == PetWindow-local，无需 geoOffset 转换
-    {
-        m_dragAnchorInPet = event->position().toPoint();
+    // ── 拖动锚点：PetWindow-local，一次拖动期间不变 ──
+    m_dragAnchorInPet = petLocal;
+    m_pressGlobalStartPos = globalPos;
+
 #ifndef QT_NO_DEBUG
-        qDebug() << "[InputProxy] mousePress"
-                 << "petGeo=" << (m_petWindow ? m_petWindow->geometry() : QRect())
-                 << "proxyGeo=" << geometry()
-                 << "proxyLocal=" << event->position().toPoint()
-                 << "anchorInPet=" << m_dragAnchorInPet;
+    qDebug() << "[InputProxy] mousePress"
+             << "petGeo=" << (m_petWindow ? m_petWindow->geometry() : QRect())
+             << "proxyGeo=" << geometry()
+             << "globalPos=" << globalPos
+             << "petLocal=" << petLocal
+             << "anchorInPet=" << m_dragAnchorInPet;
 #endif
-    }
-    m_pressStartPos = event->pos();
 }
 
 void InputProxyWindow::mouseMoveEvent(QMouseEvent *event)
@@ -297,13 +332,19 @@ void InputProxyWindow::mouseMoveEvent(QMouseEvent *event)
     }
 
     if (!m_dragging) {
-        // 尚未进入拖拽 — 检查是否超过拖拽阈值
+        // 尚未进入拖拽 — 检查是否超过拖拽阈值（使用全局坐标）
         if ((m_pressInHeadArea || m_pressInBodyArea)) {
-            const int dist = (event->pos() - m_pressStartPos).manhattanLength();
+            const int dist = (event->globalPosition().toPoint() - m_pressGlobalStartPos).manhattanLength();
             if (dist > kDragThreshold) {
                 // 超过阈值 → 启动拖拽
                 m_dragging = true;
                 grabMouse();
+#ifndef QT_NO_DEBUG
+                qDebug() << "[InputProxy] drag START"
+                         << "grabber=" << QWidget::mouseGrabber()
+                         << "petGeo=" << (m_petWindow ? m_petWindow->geometry() : QRect())
+                         << "proxyGeo=" << geometry();
+#endif
 
                 // 已移动超过阈值，不再作为点击处理
                 m_pressInHeadArea = false;
@@ -320,29 +361,38 @@ void InputProxyWindow::mouseMoveEvent(QMouseEvent *event)
 
 void InputProxyWindow::mouseReleaseEvent(QMouseEvent *event)
 {
-    if (event->button() == Qt::LeftButton) {
-        // ── 双击后第二次 release：跳过，只清除标志 ──
-        if (m_suppressNextReleaseSingle) {
-            m_suppressNextReleaseSingle = false;
-            m_pressInHeadArea = false;
-            m_pressInBodyArea = false;
-            return;
-        }
+    // ── (1) 左键且正在拖动 → 无条件结束拖动，优先于双击抑制 ──
+    if (event->button() == Qt::LeftButton && m_dragging) {
+        cleanupDrag();
+        syncGeometry();
+        emit dragFinished();
+        return;
+    }
 
-        if (m_dragging) {
-            // 拖拽结束
-            cleanupDrag();
-            emit dragFinished();
-        } else if (m_pressInHeadArea) {
-            // 头部点击 → 摸摸头
-            m_pressInHeadArea = false;
-            if (m_petWindow) m_petWindow->triggerPet();
-        } else if (m_pressInBodyArea) {
-            // 身体点击 → 随机动作
-            m_pressInBodyArea = false;
-            if (m_live2DView) m_live2DView->playTapMotion();
-        } else {
-        }
+    // ── (2) 左键之外的按键 → 基类处理 ──
+    if (event->button() != Qt::LeftButton) {
+        QWidget::mouseReleaseEvent(event);
+        return;
+    }
+
+    // ── (3) 双击抑制：第二次 release 不触发普通单击 ──
+    if (m_suppressNextReleaseSingle) {
+#ifndef QT_NO_DEBUG
+        qDebug() << "[InputProxy::mouseRelease RETURN] reason=suppressNextReleaseSingle";
+#endif
+        m_suppressNextReleaseSingle = false;
+        m_pressInHeadArea = false;
+        m_pressInBodyArea = false;
+        return;
+    }
+
+    // ── (4) 非拖动的普通单击释放 ──
+    if (m_pressInHeadArea) {
+        m_pressInHeadArea = false;
+        if (m_petWindow) m_petWindow->triggerPet();
+    } else if (m_pressInBodyArea) {
+        m_pressInBodyArea = false;
+        if (m_live2DView) m_live2DView->playTapMotion();
     }
 
     // 确保 press 状态清零
@@ -352,8 +402,9 @@ void InputProxyWindow::mouseReleaseEvent(QMouseEvent *event)
 
 void InputProxyWindow::mouseDoubleClickEvent(QMouseEvent *event)
 {
-    // 使用本次双击的坐标重新做命中检测，不沿用第一次 press 的旧状态
-    if (!isInteractivePoint(event->position())) {
+    // 使用本次双击的坐标重新做命中检测（PetWindow-local）
+    const QPoint petLocal = m_petWindow->mapFromGlobal(event->globalPosition().toPoint());
+    if (!isInteractivePetPoint(petLocal)) {
         // 未命中（透明区域双击）→ 不触发任何桌宠交互，不设置抑制
         cleanupDrag();
         return;
@@ -369,6 +420,12 @@ void InputProxyWindow::mouseDoubleClickEvent(QMouseEvent *event)
 
 void InputProxyWindow::cleanupDrag()
 {
+#ifndef QT_NO_DEBUG
+    qDebug() << "[InputProxy] cleanupDrag"
+             << "m_dragging=" << m_dragging
+             << "grabber=" << QWidget::mouseGrabber()
+             << "mouseButtons=" << QGuiApplication::mouseButtons();
+#endif
     m_dragging = false;
     m_pressInHeadArea = false;
     m_pressInBodyArea = false;
@@ -378,23 +435,26 @@ void InputProxyWindow::cleanupDrag()
     }
 }
 
-bool InputProxyWindow::isInteractivePoint(const QPointF &proxyLocalPos)
+bool InputProxyWindow::isInteractivePetPoint(const QPoint &petLocalPos) const
 {
-    const QPoint pt = proxyLocalPos.toPoint();
+    // (1) OS-level mask：需将 PetWindow-local 点转换到 proxy-local 检测
+    //     proxy-local = petLocal + petTopLeft - proxyTopLeft
+    if (m_preciseRegionValid && m_petWindow) {
+        const QRect petGeo = m_petWindow->geometry();
+        const QRect proxyGeo = geometry();
+        const QPoint proxyLocal = petLocalPos + (petGeo.topLeft() - proxyGeo.topLeft());
+        if (!m_preciseRegion.contains(proxyLocal))
+            return false;
+    }
 
-    // (1) OS-level mask：必须在 preciseRegion 内
-    if (!m_preciseRegionValid || !m_preciseRegion.contains(pt))
-        return false;
-
-    // (2) 模型内容：必须命中交互区域（HitArea / tight bounds）
-    //    Proxy-local == PetWindow-local，无需 geoOffset 转换
-    const float petPx = static_cast<float>(pt.x());
-    const float petPy = static_cast<float>(pt.y());
+    // (2) 模型交互区域：直接使用 PetWindow-local 坐标
+    const float petPx = static_cast<float>(petLocalPos.x());
+    const float petPy = static_cast<float>(petLocalPos.y());
     bool isHead = false;
     if (!m_live2DView || !m_live2DView->hitTestAt(petPx, petPy, isHead))
         return false;
 
-    // (3) 像素透明度：排除 HitArea AABB 内的透明间隙
+    // (3) 像素透明度
     if (!m_live2DView->alphaTestAt(petPx, petPy))
         return false;
 
@@ -406,18 +466,11 @@ void InputProxyWindow::handleDragMove(QMouseEvent *event)
     const QPoint newPetTopLeft = ComputeNewPosition(
         event->globalPosition().toPoint(), m_dragAnchorInPet);
 
-#ifndef QT_NO_DEBUG
-    qDebug() << "[InputProxy] dragMove"
-             << "globalMouse=" << event->globalPosition().toPoint()
-             << "anchorInPet=" << m_dragAnchorInPet
-             << "newTopLeft=" << newPetTopLeft
-             << "oldTopLeft=" << (m_petWindow ? m_petWindow->pos() : pos());
-#endif
-
     if (m_petWindow) {
+        // 第一帧：globalMouse 未变 → newPetTopLeft == 当前 PetWindow pos
         m_petWindow->move(newPetTopLeft);
-        // 拖动期间 proxy 跟随 PetWindow 完整 geometry
-        setGeometry(m_petWindow->geometry());
+        // Proxy 由 PetWindow Move eventFilter → syncGeometry 自动跟随
+        // 不再显式调用 setGeometry — 避免与 syncGeometry 屏幕裁剪冲突
     } else {
         move(newPetTopLeft);
     }
@@ -429,9 +482,10 @@ void InputProxyWindow::handleDragMove(QMouseEvent *event)
 
 void InputProxyWindow::contextMenuEvent(QContextMenuEvent *event)
 {
-    // 使用本次 ContextMenu 的坐标重新做命中检测
+    // 使用本次 ContextMenu 的坐标重新做命中检测（PetWindow-local）
     // eventFilter 已 return true 拦截非交互右键，此 checks 为兜底
-    if (!isInteractivePoint(QPointF(event->pos()))) {
+    const QPoint petLocal = m_petWindow->mapFromGlobal(event->globalPos());
+    if (!isInteractivePetPoint(petLocal)) {
         event->ignore();
         return;
     }
@@ -450,6 +504,20 @@ void InputProxyWindow::hideEvent(QHideEvent *event)
 {
     cleanupDrag();
     QWidget::hideEvent(event);
+}
+
+// ============================================================================
+// moveEvent / resizeEvent — 跟踪实际 geometry
+// ============================================================================
+
+void InputProxyWindow::moveEvent(QMoveEvent *event)
+{
+    QWidget::moveEvent(event);
+}
+
+void InputProxyWindow::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
 }
 
 // ============================================================================

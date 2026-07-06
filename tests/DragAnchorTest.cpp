@@ -3,6 +3,8 @@
 // 不依赖窗口系统、OpenGL 或 Live2D 模型。
 #include <QtTest>
 #include <QPoint>
+#include <QRect>
+#include <QRegion>
 
 #include "../interaction/DragAnchorHelpers.h"
 
@@ -289,6 +291,224 @@ private slots:
         // 拖动
         const QPoint newPos = ComputeNewPosition(QPoint(500, 400), anchor);
         QCOMPARE(newPos, QPoint(400, 300));
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // GlobalToPetPoint 纯函数测试
+    // ════════════════════════════════════════════════════════════════
+
+    void test_globalToPet_middle()
+    {
+        // PetWindow 位于屏幕中间 (200,200)，尺寸 400x500
+        // 鼠标全局位置 (400, 400) → PetWindow-local (200, 200)
+        const QPoint petTopLeft(200, 200);
+        const QPoint global(400, 400);
+        QCOMPARE(GlobalToPetPoint(global, petTopLeft), QPoint(200, 200));
+    }
+
+    void test_globalToPet_topOverflow()
+    {
+        // PetWindow 顶部越界 (-50, -50)，尺寸 400x500
+        // 鼠标全局位置 (100, 50) → PetWindow-local (150, 100)
+        const QPoint petTopLeft(-50, -50);
+        const QPoint global(100, 50);
+        QCOMPARE(GlobalToPetPoint(global, petTopLeft), QPoint(150, 100));
+    }
+
+    void test_globalToPet_bottomOverflow()
+    {
+        // PetWindow 底部超出屏幕，左上角 (200, 800)，鼠标在 (300, 850)
+        // 注意：PetWindow-local (300-200, 850-800) = (100, 50)
+        // 与 proxy-local 无关
+        const QPoint petTopLeft(200, 800);
+        const QPoint global(300, 850);
+        QCOMPARE(GlobalToPetPoint(global, petTopLeft), QPoint(100, 50));
+    }
+
+    void test_globalToPet_independentOfProxy()
+    {
+        // GlobalToPetPoint 完全不受 proxy offset/size 影响
+        const QPoint petTopLeft(100, -30);
+        // proxy 可能在 (100, 0) 即 offset (0, 30)，但不影响
+        const QPoint global(250, 120);
+        const QPoint expected(150, 150);
+        QCOMPARE(GlobalToPetPoint(global, petTopLeft), expected);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // ComputePetTopLeftFromDrag 纯函数测试
+    // ════════════════════════════════════════════════════════════════
+
+    void test_firstFrame_noTeleport()
+    {
+        // 按下时：PetWindow 在 (300, 200)，鼠标全局 (500, 400)
+        // 锚点 = PetWindow-local (200, 200)
+        // 第一帧鼠标未移动：newPos = (500, 400) - (200, 200) = (300, 200) == 原位置
+        const QPoint petTopLeft(300, 200);
+        const QPoint globalMouse(500, 400);
+        const QPoint anchorInPet = GlobalToPetPoint(globalMouse, petTopLeft);
+        QCOMPARE(anchorInPet, QPoint(200, 200));
+        const QPoint newPos = ComputePetTopLeftFromDrag(globalMouse, anchorInPet);
+        QCOMPARE(newPos, petTopLeft);
+    }
+
+    void test_firstFrame_topOverflow()
+    {
+        // 顶部越界：PetWindow 在 (100, -60)，鼠标全局 (250, 100)
+        // 锚点 = PetWindow-local (150, 160)
+        // 第一帧：newPos = (250, 100) - (150, 160) = (100, -60) ✅ 不瞬移
+        const QPoint petTopLeft(100, -60);
+        const QPoint globalMouse(250, 100);
+        const QPoint anchorInPet = GlobalToPetPoint(globalMouse, petTopLeft);
+        QCOMPARE(anchorInPet, QPoint(150, 160));
+        const QPoint newPos = ComputePetTopLeftFromDrag(globalMouse, anchorInPet);
+        QCOMPARE(newPos, petTopLeft);
+    }
+
+    void test_firstFrame_bottomOverflow()
+    {
+        // 底部越界：PetWindow 在 (200, 900)，鼠标全局 (350, 950)
+        // 锚点 = PetWindow-local (150, 50)
+        const QPoint petTopLeft(200, 900);
+        const QPoint globalMouse(350, 950);
+        const QPoint anchorInPet = GlobalToPetPoint(globalMouse, petTopLeft);
+        QCOMPARE(anchorInPet, QPoint(150, 50));
+        const QPoint newPos = ComputePetTopLeftFromDrag(globalMouse, anchorInPet);
+        QCOMPARE(newPos, petTopLeft);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // 连续拖动 20 次无累计偏移
+    // ════════════════════════════════════════════════════════════════
+
+    void test_20consecutiveDrags_noDrift()
+    {
+        // 第一次按下
+        QPoint petTopLeft(400, 300);
+        QPoint globalMouse(600, 500);
+        QPoint anchorInPet = GlobalToPetPoint(globalMouse, petTopLeft);
+        QCOMPARE(anchorInPet, QPoint(200, 200));
+
+        // 连续拖动 20 次
+        for (int i = 0; i < 20; ++i) {
+            globalMouse += QPoint(10, 5);
+            const QPoint newTopLeft = ComputePetTopLeftFromDrag(globalMouse, anchorInPet);
+            // 每次 globalMouse 移动 (10,5)，PetWindow 也应移动 (10,5)
+            QCOMPARE(newTopLeft - petTopLeft, QPoint(10, 5));
+            petTopLeft = newTopLeft;
+        }
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    // DeriveProxyMask 纯函数测试
+    // ════════════════════════════════════════════════════════════════
+
+    void test_deriveMask_identicalGeo()
+    {
+        // PetWindow 与 Proxy geometry 完全一致 → mask 无需平移
+        const QRect petGeo(100, 100, 400, 500);
+        const QRect proxyGeo(100, 100, 400, 500);
+        QRegion canonicalRect;
+        canonicalRect |= QRegion(50, 60, 100, 200);
+        canonicalRect |= QRegion(200, 100, 80, 150);
+
+        QRegion mask = DeriveProxyMask(canonicalRect, petGeo, proxyGeo);
+        // translation = (100,100) - (100,100) = (0,0)，mask == canonicalRect
+        QVERIFY(mask == canonicalRect);
+    }
+
+    void test_deriveMask_topClip()
+    {
+        // PetWindow 顶部越界：origin(-50, -30)，proxy 裁剪到 (0, 0)
+        // 屏幕可用区从 y=0 开始
+        const QRect petGeo(-50, -30, 400, 500);
+        const QRect proxyGeo(0, 0, 350, 470);  // intersected
+        // PetWindow-local drawable 在 (10, 20, 100, 200)
+        QRegion canonicalRect(QRegion(10, 20, 100, 200));
+        // translation = (-50,-30) - (0,0) = (-50,-30)
+        // proxy-local = petLocal + (-50,-30) = (-40, -10)  → intersected 后 (0, 0, 60, 190)
+        // 注意：(-40, -10) 到 (60, 190)，intersect 到 proxy size → (0, 0, 60, 190)
+        QRegion expected(QRegion(0, 0, 60, 190));
+        QRegion mask = DeriveProxyMask(canonicalRect, petGeo, proxyGeo);
+        // 因为 QRegion(10-50, 20-30, 100, 200) 在 x=-40..60, y=-10..190
+        // intersected with (0,0,350,470) → (0,0,60,190)
+        QCOMPARE(mask.boundingRect(), expected.boundingRect());
+    }
+
+    void test_deriveMask_bottomClip()
+    {
+        // PetWindow 底部越界：origin(0, 900)，proxy 裁剪到底部
+        // 屏幕可用区高 1000，但有任务栏，假设 available 高 950
+        // petGeo 底部 = 900+500 = 1400 > 950，proxy 高 = 950-900 = 50
+        const QRect petGeo(0, 900, 400, 500);
+        const QRect proxyGeo(0, 900, 400, 50);  // 屏幕内上半部分
+        // PetWindow-local drawable 在 bottom 区域 (50, 920, 100, 200)
+        // PetWindow-local: (50, 920, 100, 200) 表示在 PetWindow 内的位置
+        // translation = (0,900) - (0,900) = (0,0)
+        // proxy-local = (50, 920, 100, 200)
+        // intersected with proxy (0, 900, 400, 50) in proxy-local coords
+        // proxy-local (50, 920, 100, 200) → intersected with (0, 0, 400, 50)
+        // wait... the DeriveProxyMask function:
+        // canonicalPetRegion.translated(petGeo.topLeft() - actualProxyGeo.topLeft())
+        // = canonicalPetRegion.translated((0,900) - (0,900)) = canonicalPetRegion.translated(0,0)
+        // = canonicalPetRegion unchanged at (50, 920, 100, 200)
+        // Then intersected with QRect(0, 0, 400, 50)
+        // In proxy-local coords: the region (50, 920, 100, 200) is way below the proxy
+        // Wait, that's wrong. The region (50, 920, 100, 200) is in PetWindow-local coords.
+        // After translation (0,0), it's still (50, 920, 100, 200) in proxy-local coords.
+        // But the proxy is only 50 pixels tall (proxy-local y 0..50).
+        // So (50, 920) is way outside the proxy. The mask would be empty.
+        //
+        // This doesn't make sense. Let me rethink.
+        //
+        // PetWindow-local coordinates: (0,0) is the top-left of the PetWindow.
+        // So a drawable at PetWindow-local (50, 920) is 920 pixels below PetWindow's top.
+        // PetWindow itself starts at y=900 on screen.
+        // So the drawable screen position is 900 + 920 = 1820 — way below the screen.
+        //
+        // A more realistic test: the drawable is in the VISIBLE part.
+        // Let's assume PetWindow at (0, 900), proxy at (0, 900, 400, 50).
+        // A drawable near the top of PetWindow: PetWindow-local (50, 0, 100, 50).
+        // That's at screen y 900..950, which is within the proxy.
+        // After translation (0,0): proxy-local (50, 0, 100, 50).
+        // Intersected with (0, 0, 400, 50): (50, 0, 100, 50) — fully visible!
+        //
+        // So the mask correctly preserves the visible part.
+
+        QRegion canonicalRect(QRegion(50, 10, 100, 60)); // drawable near PetWindow top
+        // translation = (0,900) - (0,900) = (0,0)
+        // proxy-local same as pet-local
+        // intersected with proxy size (400, 50)
+        QRegion expected(QRegion(50, 10, 100, 40)); // clipped to 40 high
+        QRegion mask = DeriveProxyMask(canonicalRect, petGeo, proxyGeo);
+        QCOMPARE(mask.boundingRect(), expected.boundingRect());
+    }
+
+    void test_deriveMask_canonicalUnmodified()
+    {
+        // 验证 canonicalPetRegion 不被 DeriveProxyMask 修改
+        const QRect petGeo(100, 100, 400, 500);
+        const QRect proxyGeo(0, 0, 500, 600);  // proxy 不同位置
+        QRegion canonicalRect(QRegion(50, 60, 100, 200));
+        const QRegion original = canonicalRect;
+
+        QRegion mask = DeriveProxyMask(canonicalRect, petGeo, proxyGeo);
+        QVERIFY(mask != canonicalRect);  // 被平移了
+        QVERIFY(canonicalRect == original);  // canonical 不变
+    }
+
+    void test_deriveMask_requestedVsActual()
+    {
+        // requested proxy geo 与实际不同时，mask 使用 actual geometry
+        // requested: (0, 0, 400, 500), actual: (2, 0, 396, 500) — WM 调整了 x
+        const QRect petGeo(100, 100, 400, 500);
+        const QRect actualProxyGeo(102, 100, 396, 500);  // WM moved right by 2
+        QRegion canonicalRect(QRegion(50, 60, 100, 200));
+        // translation = (100,100) - (102,100) = (-2, 0)
+        // proxy-local = (48, 60, 100, 200)
+        QRegion expected(QRegion(48, 60, 100, 200));
+        QRegion mask = DeriveProxyMask(canonicalRect, petGeo, actualProxyGeo);
+        QVERIFY(mask == expected);
     }
 };
 
