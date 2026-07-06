@@ -1,4 +1,5 @@
 #include "SettingsWindow.h"
+#include "../core/BedtimeHelper.h"
 
 #include <QLineEdit>
 #include <QCheckBox>
@@ -256,6 +257,40 @@ void SettingsWindow::setupUi()
     connect(m_bubbleBorderBtn, &QPushButton::clicked, this, &SettingsWindow::onBubbleBorderColorClicked);
     connect(m_bubbleTextBtn, &QPushButton::clicked, this, &SettingsWindow::onBubbleTextColorClicked);
 
+    // ──── 深夜就寝提醒 ────
+    auto *bedtimeGroup = new QGroupBox(QStringLiteral("深夜就寝提醒"), this);
+    auto *bedtimeLayout = new QVBoxLayout(bedtimeGroup);
+
+    m_bedtimeEnableCheckBox = new QCheckBox(QStringLiteral("启用深夜就寝提醒"), this);
+    m_bedtimeEnableCheckBox->setChecked(true);
+
+    m_bedtimeRandomCheckBox = new QCheckBox(QStringLiteral("随机使用本地提醒文案"), this);
+    m_bedtimeRandomCheckBox->setChecked(true);
+    // 随机模式开启时，自定义文本编辑区不可用
+    connect(m_bedtimeRandomCheckBox, &QCheckBox::toggled, this, [this](bool random) {
+        m_bedtimeEdit->setEnabled(!random);
+        m_bedtimeResetBtn->setEnabled(!random);
+    });
+
+    auto *msgRow = new QHBoxLayout();
+    m_bedtimeEdit = new QLineEdit(this);
+    m_bedtimeEdit->setPlaceholderText(QStringLiteral("主人，已经很晚啦，早点休息吧喵～"));
+    m_bedtimeEdit->setMaxLength(200);
+    m_bedtimeResetBtn = new QPushButton(QStringLiteral("恢复默认"), this);
+    msgRow->addWidget(m_bedtimeEdit, 1);
+    msgRow->addWidget(m_bedtimeResetBtn);
+
+    auto *hintLabel = new QLabel(QStringLiteral("深夜 0:00～6:00 内，每 60 分钟最多提醒一次。"), this);
+    hintLabel->setStyleSheet(QStringLiteral("font-size: 11px; color: #888;"));
+
+    bedtimeLayout->addWidget(m_bedtimeEnableCheckBox);
+    bedtimeLayout->addWidget(m_bedtimeRandomCheckBox);
+    bedtimeLayout->addLayout(msgRow);
+    bedtimeLayout->addWidget(hintLabel);
+    bedtimeGroup->setLayout(bedtimeLayout);
+
+    connect(m_bedtimeResetBtn, &QPushButton::clicked, this, &SettingsWindow::onBedtimeResetClicked);
+
     // --- 保存按钮 ---
     m_saveButton = new QPushButton(QStringLiteral("保存"), this);
     connect(m_saveButton, &QPushButton::clicked, this, &SettingsWindow::onSaveClicked);
@@ -271,6 +306,7 @@ void SettingsWindow::setupUi()
     contentLayout->addWidget(appearanceGroup);
     contentLayout->addWidget(chatBgGroup);
     contentLayout->addWidget(bubbleGroup);
+    contentLayout->addWidget(bedtimeGroup);
     contentLayout->addWidget(interactionGroup);
     contentLayout->addStretch();
 
@@ -368,6 +404,16 @@ void SettingsWindow::onSaveClicked()
     emit headTrackingToggled(m_headTrackingCheckBox->isChecked());
     emit ttsToggled(m_ttsCheckBox->isChecked());
     emit keepOnTopToggled(m_keepOnTopCheckBox->isChecked());
+
+    // ★ 深夜就寝提醒
+    emit bedtimeReminderToggled(m_bedtimeEnableCheckBox->isChecked());
+    emit bedtimeRandomToggled(m_bedtimeRandomCheckBox->isChecked());
+    {
+        // 始终经过清洗，空/空白 → 默认文本，清洗后回填到输入框
+        const QString cleanMsg = BedtimeHelper::sanitizeBedtimeMessage(m_bedtimeEdit->text());
+        m_bedtimeEdit->setText(cleanMsg);
+        emit bedtimeMessageChanged(cleanMsg);
+    }
 
     const int backend = m_backendCombo->currentData().toInt();
     emit ttsBackendChanged(backend);
@@ -722,6 +768,28 @@ void SettingsWindow::onEdgeTestSpeechClicked()
     m_edgeTestStatusLabel->setText(QStringLiteral("合成中..."));
 
     emit edgeTestSpeechRequested(QStringLiteral("这是一次语音测试喵~"));
+}
+
+// ──── 深夜就寝提醒 ────────────────────────────────────────────────────────────
+
+void SettingsWindow::onBedtimeResetClicked()
+{
+    m_bedtimeEdit->setText(QStringLiteral("主人，已经很晚啦，早点休息吧喵～"));
+}
+
+void SettingsWindow::setBedtimeReminderEnabled(bool enabled)
+{
+    m_bedtimeEnableCheckBox->setChecked(enabled);
+}
+
+void SettingsWindow::setBedtimeMessage(const QString &msg)
+{
+    m_bedtimeEdit->setText(msg);
+}
+
+void SettingsWindow::setBedtimeRandomEnabled(bool enabled)
+{
+    m_bedtimeRandomCheckBox->setChecked(enabled);
 }
 
 void SettingsWindow::closeEvent(QCloseEvent *event)

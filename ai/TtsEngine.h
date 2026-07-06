@@ -38,6 +38,9 @@ public:
     void setEnabled(bool enabled);
     bool isEnabled() const { return m_enabled; }
 
+    /// 是否正忙（合成中、网络请求中、播放中），深夜提醒据此决定是否打断
+    bool isBusy() const;
+
     /// --- 后端选择 ---
     void setBackend(Backend backend);
     Backend backend() const { return m_backend; }

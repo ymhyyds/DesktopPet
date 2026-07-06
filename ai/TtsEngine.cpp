@@ -300,6 +300,27 @@ void TtsEngine::stop()
 }
 
 // ============================================================================
+// 繁忙查询 — 覆盖合成、请求和播放全链路
+// ============================================================================
+
+bool TtsEngine::isBusy() const
+{
+    // 1. Edge TTS 子进程正在运行（合成中）
+    if (m_edgeProcess && m_edgeProcess->state() != QProcess::NotRunning)
+        return true;
+
+    // 2. VoiceVox 网络请求进行中
+    if (m_vvClient && m_vvClient->hasPendingRequests())
+        return true;
+
+    // 3. 音频正在播放（或暂停/缓冲中）
+    if (m_mediaPlayer->playbackState() != QMediaPlayer::StoppedState)
+        return true;
+
+    return false;
+}
+
+// ============================================================================
 // 播放器控制
 // ============================================================================
 

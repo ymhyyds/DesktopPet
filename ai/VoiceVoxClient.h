@@ -45,6 +45,9 @@ public:
     /// 取消所有进行中的请求
     void cancelPendingRequests();
 
+    /// 是否有进行中的网络请求
+    bool hasPendingRequests() const { return !m_pendingReplies.isEmpty(); }
+
 signals:
     void speakersReady();
     void audioReady(int requestId, const QByteArray &wavData);

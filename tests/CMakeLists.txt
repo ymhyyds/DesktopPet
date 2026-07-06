@@ -88,3 +88,30 @@ add_test(NAME test_tts
     COMMAND test_tts
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# ── Bedtime Reminder Unit Tests ───────────────────────────────────────────────
+# Tests pure logic in BedtimeHelper.h (no mock server, no App/TTS dependencies).
+
+add_executable(test_bedtime
+    ${CMAKE_CURRENT_SOURCE_DIR}/BedtimeReminderTest.cpp
+)
+
+set_target_properties(test_bedtime PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_bedtime PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/core
+)
+
+target_link_libraries(test_bedtime PRIVATE
+    Qt6::Test
+    Qt6::Core
+    Qt6::Gui
+)
+
+add_test(NAME test_bedtime
+    COMMAND test_bedtime
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)

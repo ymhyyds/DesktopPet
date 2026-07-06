@@ -21,6 +21,7 @@
 #include "../settings/CropDialog.h"
 #include "WeatherManager.h"
 #include "GlobalHotkeyManager.h"
+#include "BedtimeHelper.h"
 
 #include <QApplication>
 
@@ -45,6 +46,7 @@
 #include <QNetworkRequest>
 #include <QTimer>
 #include <QTime>
+#include <QRegularExpression>
 
 App::App(QObject *parent)
     : QObject(parent)
@@ -54,60 +56,160 @@ App::App(QObject *parent)
 App::~App() = default;
 
 // ---------------------------------------------------------------------------
-// 深夜就寝提醒：0:00~6:00 间每隔 5 分钟检查一次，
-// 如果系统未进入空闲状态（用户还在用电脑），
-// 用 TTS 语音 + 浮动文字提醒主人该睡觉了。
-// 每晚只提醒一次。
+// 深夜就寝提醒：
+//   - 生效时段 00:00～06:00
+//   - 每 5 分钟检查一次，启动后立即检查
+//   - 每次成功提醒后冷却 60 分钟（QSettings 持久化，重启仍遵守）
+//   - 用户空闲超过 10 分钟不提醒
+//   - 全屏逻辑复用现有 fullscreenDisplayEnabled 和外部全屏状态
+//   - AI 忙碌 / TTS 忙碌时保留 pending，忙碌结束后再检查
+//   - TTS 失败后不得重复提醒
 // ---------------------------------------------------------------------------
+
 void App::setupBedtimeReminder()
 {
+    // ── 从 QSettings 加载设置 ──
+    QSettings ss(QStringLiteral("DesktopPet"), QStringLiteral("App"));
+    m_bedtimeReminderEnabled = ss.value(QStringLiteral("BedtimeReminder/enabled"), true).toBool();
+    const QString saved = ss.value(QStringLiteral("BedtimeReminder/message")).toString();
+    m_bedtimeMessage = sanitizeBedtimeMessage(saved);
+    m_bedtimeUseRandom = ss.value(QStringLiteral("BedtimeReminder/useRandomMessages"), true).toBool();
+    m_bedtimeLastMessageIndex = ss.value(QStringLiteral("BedtimeReminder/lastMessageIndex"), -1).toInt();
+
+    qInfo() << "[Bedtime] 设置已加载: enabled=" << m_bedtimeReminderEnabled
+            << "useRandom=" << m_bedtimeUseRandom
+            << "lastIndex=" << m_bedtimeLastMessageIndex
+            << "message=" << m_bedtimeMessage;
+
+    // ── 创建定时器 ──
     m_bedtimeTimer = new QTimer(this);
     m_bedtimeTimer->setInterval(5 * 60 * 1000); // 5 分钟
 
     connect(m_bedtimeTimer, &QTimer::timeout, this, [this]() {
-        const int hour = QTime::currentTime().hour();
+        checkBedtimeReminder();
+    });
 
-        // 只在 0:00~6:00 之间检查
-        if (hour < 0 || hour >= 6) {
-            // 不在深夜时段 → 重置提醒标记，等下一个深夜
-            m_bedtimeReminded = false;
-            return;
-        }
+    // 启动定时器
+    m_bedtimeTimer->start();
 
-        // 今晚已经提醒过了，不再重复
-        if (m_bedtimeReminded) return;
+    // 程序启动后立即检查
+    QTimer::singleShot(0, this, [this]() {
+        checkBedtimeReminder();
+    });
+}
 
-        // 检查系统空闲时间（Windows GetLastInputInfo）
+// ---------------------------------------------------------------------------
+// 检查并执行就寝提醒（核心调度函数）
+// ---------------------------------------------------------------------------
+void App::checkBedtimeReminder()
+{
+    // 1. 功能未启用 → 清除 pending
+    if (!m_bedtimeReminderEnabled) {
+        m_bedtimeReminderPending = false;
+        return;
+    }
+
+    // 2. 时段检查：只在 0:00~6:00 之间生效
+    if (!BedtimeHelper::isBedtimeHour(QTime::currentTime().hour())) {
+        m_bedtimeReminderPending = false;
+        return;
+    }
+
+    // 3. 冷却检查：从 QSettings 读取 lastReminderUtc
+    QSettings ss(QStringLiteral("DesktopPet"), QStringLiteral("App"));
+    const qint64 lastReminderUtc = ss.value(QStringLiteral("BedtimeReminder/lastReminderUtc"),
+                                              static_cast<qint64>(0)).toLongLong();
+    const qint64 nowUtc = QDateTime::currentSecsSinceEpoch();
+    if (!BedtimeHelper::isPastCooldown(lastReminderUtc, nowUtc, 3600)) {
+        m_bedtimeReminderPending = false;
+        return;
+    }
+
+    // 4. 空闲检查：超过 10 分钟无用户输入 → 假设已睡着
+    //    dwTime 是 DWORD（32 位），每 ~49.7 天回绕一次。
+    //    用 GetTickCount64() 的低 32 位与 dwTime 做无符号 DWORD 减法，
+    //    利用 DWORD 模运算正确处理回绕，仅适用于最近一次输入间隔。
 #ifdef Q_OS_WIN
+    {
         LASTINPUTINFO lii;
         lii.cbSize = sizeof(LASTINPUTINFO);
         if (GetLastInputInfo(&lii)) {
-            const DWORD now = GetTickCount();
-            const DWORD idleMs = now - lii.dwTime;
-            // 如果超过 10 分钟没有输入 → 认为已离开/睡着，不打扰
-            if (idleMs > 10 * 60 * 1000) return;
+            const DWORD now32 = static_cast<DWORD>(GetTickCount64());
+            const DWORD idleThreshold = static_cast<DWORD>(10 * 60 * 1000);
+            if (BedtimeHelper::isUserIdle(lii.dwTime, now32, idleThreshold)) {
+                m_bedtimeReminderPending = false;
+                return;
+            }
         }
+    }
 #endif
 
-        // 触发提醒
-        m_bedtimeReminded = true;
-        const QString msg = QStringLiteral("主人该上床睡觉了喵");
+    // 5. 检查当前是否可提醒（全屏 / AI / TTS 状态）
+    if (!canRemindNow()) {
+        m_bedtimeReminderPending = true;
+        return;
+    }
 
-        qInfo() << "[Bedtime] 深夜提醒：" << msg;
+    // 6. 执行提醒
+    performBedtimeReminder();
+}
 
-        // TTS 语音朗读
-        if (m_ttsEngine && m_ttsEngine->isEnabled()) {
-            m_ttsEngine->speak(msg);
+// ---------------------------------------------------------------------------
+// 检查当前是否真的可以发声（全屏策略 / AI 忙碌 / TTS 忙碌）
+// ---------------------------------------------------------------------------
+bool App::canRemindNow() const
+{
+    const bool ttsBusy = m_ttsEngine && m_ttsEngine->isBusy();
+    return BedtimeHelper::canRemindNow(
+        m_effectiveExternalFullscreenActive,
+        m_fullscreenDisplayEnabled,
+        m_aiBusy,
+        ttsBusy);
+}
+
+// ---------------------------------------------------------------------------
+// 执行提醒：对话气泡 + TTS
+// ---------------------------------------------------------------------------
+void App::performBedtimeReminder()
+{
+    m_bedtimeReminderPending = false;
+
+    // ── 选择文案（随机模式 / 固定模式） ──
+    const auto sel = BedtimeHelper::selectBedtimeMessage(
+        m_bedtimeUseRandom, m_bedtimeLastMessageIndex, m_bedtimeMessage);
+    const QString &msg = sel.message;
+
+    qInfo() << "[Bedtime] 深夜提醒：" << msg
+            << "useRandom=" << m_bedtimeUseRandom
+            << "index=" << sel.messageIndex;
+
+    // 1. 对话气泡 — 只有成功显示后才更新 lastReminderUtc 和索引
+    if (m_petWindow) {
+        m_petWindow->showSpeechBubble(msg);
+        QSettings ss(QStringLiteral("DesktopPet"), QStringLiteral("App"));
+        ss.setValue(QStringLiteral("BedtimeReminder/lastReminderUtc"),
+                    QDateTime::currentSecsSinceEpoch());
+        if (m_bedtimeUseRandom) {
+            m_bedtimeLastMessageIndex = sel.messageIndex;
+            ss.setValue(QStringLiteral("BedtimeReminder/lastMessageIndex"),
+                        sel.messageIndex);
         }
+        qInfo() << "[Bedtime] 对话气泡已显示，lastReminderUtc 已更新";
+    }
 
-        // 浮动文字
-        if (m_petWindow) {
-            m_petWindow->showFloatingText(msg, QColor(180, 180, 255));
-        }
-    });
+    // 2. TTS 朗读（不因 TTS 失败而回滚 lastReminderUtc）
+    //    唤醒时机由 canRemindNow 的 isBusy() 保护，不会打断现有语音
+    if (m_ttsEngine && m_ttsEngine->isEnabled()) {
+        m_ttsEngine->speak(msg);
+    }
+}
 
-    // 启动定时器（立即开始，第一次触发在 5 分钟后）
-    m_bedtimeTimer->start();
+// ---------------------------------------------------------------------------
+// 清理自定义消息文本：委托给 BedtimeHelper 以保持单点维护
+// ---------------------------------------------------------------------------
+QString App::sanitizeBedtimeMessage(const QString &msg)
+{
+    return BedtimeHelper::sanitizeBedtimeMessage(msg);
 }
 
 bool App::initialize()
@@ -737,6 +839,38 @@ void App::setupConnections()
                 applyCurrentPairedWindowPolicy();
             });
 
+    // ★ 设置 → 深夜就寝提醒
+    connect(m_settingsWindow.get(), &SettingsWindow::bedtimeReminderToggled,
+            this, [this](bool enabled) {
+                m_bedtimeReminderEnabled = enabled;
+                QSettings(QStringLiteral("DesktopPet"), QStringLiteral("App"))
+                    .setValue(QStringLiteral("BedtimeReminder/enabled"), enabled);
+                qInfo() << "[Bedtime] 功能已" << (enabled ? "启用" : "禁用");
+                // 启用后立即检查一次
+                if (enabled) {
+                    checkBedtimeReminder();
+                } else {
+                    m_bedtimeReminderPending = false;
+                }
+            });
+
+    connect(m_settingsWindow.get(), &SettingsWindow::bedtimeMessageChanged,
+            this, [this](const QString &msg) {
+                m_bedtimeMessage = sanitizeBedtimeMessage(msg);
+                QSettings(QStringLiteral("DesktopPet"), QStringLiteral("App"))
+                    .setValue(QStringLiteral("BedtimeReminder/message"), m_bedtimeMessage);
+                qInfo() << "[Bedtime] 消息已更新";
+            });
+
+    // ★ 设置 → 随机文案切换
+    connect(m_settingsWindow.get(), &SettingsWindow::bedtimeRandomToggled,
+            this, [this](bool enabled) {
+                m_bedtimeUseRandom = enabled;
+                QSettings(QStringLiteral("DesktopPet"), QStringLiteral("App"))
+                    .setValue(QStringLiteral("BedtimeReminder/useRandomMessages"), enabled);
+                qInfo() << "[Bedtime] 随机文案已" << (enabled ? "启用" : "禁用");
+            });
+
     // ★ 设置 → TTS 开关
     connect(m_settingsWindow.get(), &SettingsWindow::ttsToggled,
             this, [this](bool enabled) {
@@ -875,6 +1009,19 @@ void App::setupConnections()
                 m_testSpeechInProgress = false;
                 m_settingsWindow->setEdgeTestEnabled(true);
                 m_settingsWindow->setEdgeTestStatusText(QStringLiteral("就绪"));
+            });
+
+    // ★ TtsEngine 播放完毕 → 检查就寝提醒 pending（TTS 空闲后触发）
+    // 管理连接，防止 setupConnections() 被多次调用时产生重复回调
+    if (m_bedtimePlaybackConnection) {
+        QObject::disconnect(m_bedtimePlaybackConnection);
+    }
+    m_bedtimePlaybackConnection = connect(m_ttsEngine.get(), &TtsEngine::playbackFinished,
+            this, [this](int) {
+                if (m_bedtimeReminderPending) {
+                    qInfo() << "[Bedtime] TTS 播放完毕 → 检查 pending 提醒";
+                    checkBedtimeReminder();
+                }
             });
 
 
@@ -1082,6 +1229,11 @@ void App::openSettingsWindow()
     m_settingsWindow->setHeadTrackingEnabled(m_petWindow ? m_petWindow->headTrackingEnabled() : false);
     m_settingsWindow->setKeepOnTop(m_fullscreenDisplayEnabled);
     m_settingsWindow->setTtsEnabled(m_ttsEngine && m_ttsEngine->isEnabled());
+
+    // ★ 深夜就寝提醒
+    m_settingsWindow->setBedtimeReminderEnabled(m_bedtimeReminderEnabled);
+    m_settingsWindow->setBedtimeMessage(m_bedtimeMessage);
+    m_settingsWindow->setBedtimeRandomEnabled(m_bedtimeUseRandom);
 
     // 📸 当前截图保存路径
     {
@@ -1417,6 +1569,12 @@ void App::applyCurrentPairedWindowPolicy()
             m_policyVisibilitySaved = false;
         }
         applyPairedWindowPolicy(PairedWindowPolicy::Normal);
+
+        // ★ 退出全屏后检查就寝提醒 pending
+        if (m_bedtimeReminderPending) {
+            qInfo() << "[Bedtime] 退出全屏 → 检查 pending 提醒";
+            checkBedtimeReminder();
+        }
     } else if (displayEnabled) {
         // ── 全屏覆盖：两个窗口可见 + HWND_TOPMOST ──
         applyPairedWindowPolicy(PairedWindowPolicy::FullscreenOverlay);

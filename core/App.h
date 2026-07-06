@@ -68,6 +68,10 @@ public slots:
 private:
     void setupConnections();
     void setupBedtimeReminder();
+    void checkBedtimeReminder();
+    bool canRemindNow() const;
+    void performBedtimeReminder();
+    static QString sanitizeBedtimeMessage(const QString &msg);
     /// 截取桌宠（和聊天窗口）截图，保存并复制到剪贴板
     void takeScreenshot();
 
@@ -151,8 +155,13 @@ private:
     QString m_currentCharacter;
 
     // --- 深夜就寝提醒 ---
-    QTimer *m_bedtimeTimer   = nullptr;
-    bool    m_bedtimeReminded = false;
+    QTimer *m_bedtimeTimer               = nullptr;
+    QString m_bedtimeMessage;
+    bool    m_bedtimeReminderEnabled      = false;
+    bool    m_bedtimeReminderPending      = false;
+    bool    m_bedtimeUseRandom            = true;
+    int     m_bedtimeLastMessageIndex      = -1;
+    QMetaObject::Connection m_bedtimePlaybackConnection;
 
     // --- 自动扫描新模型 ---
     QFileSystemWatcher *m_fsWatcher = nullptr;

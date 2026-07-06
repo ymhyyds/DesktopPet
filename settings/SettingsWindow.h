@@ -55,6 +55,11 @@ public:
     void setBubbleBorderColor(const QColor &color);
     void setBubbleTextColor(const QColor &color);
 
+    /// 深夜就寝提醒
+    void setBedtimeReminderEnabled(bool enabled);
+    void setBedtimeMessage(const QString &msg);
+    void setBedtimeRandomEnabled(bool enabled);
+
 public slots:
     void showAndRaise();
 
@@ -90,6 +95,11 @@ signals:
     void bubbleBorderColorChanged(const QColor &color);
     void bubbleTextColorChanged(const QColor &color);
 
+    /// 深夜就寝提醒
+    void bedtimeReminderToggled(bool enabled);
+    void bedtimeMessageChanged(const QString &msg);
+    void bedtimeRandomToggled(bool enabled);
+
 protected:
     void closeEvent(QCloseEvent *event) override;
 
@@ -105,6 +115,7 @@ private slots:
     void onBubbleTextColorClicked();
     void onEdgeBrowseClicked();
     void onEdgeTestSpeechClicked();
+    void onBedtimeResetClicked();
 
 private:
     void setupUi();
@@ -156,4 +167,10 @@ private:
     QPushButton *m_edgeTestBtn       = nullptr;
     QLabel      *m_edgeTestStatusLabel = nullptr;
     QString      m_edgeVoice = QStringLiteral("zh-CN-XiaoyiNeural");
+
+    // ──── 深夜就寝提醒 ────
+    QCheckBox   *m_bedtimeEnableCheckBox = nullptr;
+    QCheckBox   *m_bedtimeRandomCheckBox = nullptr;
+    QLineEdit   *m_bedtimeEdit          = nullptr;
+    QPushButton *m_bedtimeResetBtn      = nullptr;
 };
