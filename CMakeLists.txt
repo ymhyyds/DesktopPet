@@ -59,6 +59,8 @@ set(PET_SOURCES
     pet/SpeechBubble.h
     pet/FloatingTextWidget.cpp
     pet/FloatingTextWidget.h
+    pet/LipSyncConfig.cpp
+    pet/LipSyncConfig.h
 )
 
 set(AI_SOURCES

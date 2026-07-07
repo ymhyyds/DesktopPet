@@ -12,6 +12,7 @@
 #include "LAppModel_Common.hpp"
 #include "PetAnimationState.h"
 #include "LipSyncEnvelope.h"
+#include "LipSyncConfig.h"
 
 /**
  * @brief ModelController — CubismUserModelExtend 的增强版。
@@ -280,12 +281,34 @@ private:
 
     /// LipSync 参数 ID 列表（从 SDK GetLipSyncParameterId 读取）
     Csm::csmVector<Csm::CubismIdHandle> m_lipSyncIds;
-    /// LipSync 功能是否可用（非空参数组）
+    /// LipSync 功能是否可用（标准组或 fallback 任一有效）
     bool m_lipSyncSupported = false;
     /// 当前说话状态（由 TTS 驱动）
     bool m_isSpeaking = false;
     /// LipSync 包络算法实例
     LipSyncEnvelope m_lipSyncEnvelope;
+
+    // ── Fallback sidecar 配置 ──
+    /// 当前参数来源
+    LipSyncParameterSource m_lipSyncSource = LipSyncParameterSource::Disabled;
+    /// sidecar 文件完整路径
+    QString m_lipSyncSidecarPath;
+    /// fallback resolved 参数列表（仅当 source==ExternalConfig 时有效）
+    QVector<ResolvedLipSyncParam> m_lipSyncFallbackParams;
+
+    /// 尝试加载 sidecar fallback 配置（在标准组无效时调用）
+    void loadLipSyncFallback();
+    /// 输出完整模型参数目录到日志（仅当无有效 LipSync 时调用）
+    void dumpModelParameterDirectory();
+
+    // ── 实际模型参数目录 ──
+    /// 重建 m_actualParameterMap（遍历 _model 枚举）
+    void rebuildActualParameterMap();
+    /// 在实际参数映射中查找 ID，返回真实 index 或 -1
+    int findActualParameterIndex(Csm::CubismIdHandle id) const;
+
+    /// 实际模型参数索引映射 { CubismIdHandle → index }，加载时枚举建立
+    QHash<const void*, int> m_actualParameterMap;
 public:
     // ====================================================================
     // 🎯 命中检测区域 — model3.json HitAreas / drawable 名称匹配

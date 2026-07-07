@@ -225,3 +225,32 @@ add_test(NAME test_lipsync
     COMMAND test_lipsync
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# ── LipSync Fallback Config Unit Tests ─────────────────────────────────
+# Pure logic tests for sidecar config parsing, mapping, source selection.
+# No Cubism SDK, no OpenGL, no Qt Multimedia, no mock server.
+# Only Qt6::Test + Qt6::Core (via LipSyncConfig.h).
+
+add_executable(test_lipsync_fallback
+    ${CMAKE_CURRENT_SOURCE_DIR}/LipSyncFallbackTest.cpp
+    ${CMAKE_SOURCE_DIR}/pet/LipSyncConfig.cpp
+)
+
+set_target_properties(test_lipsync_fallback PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_lipsync_fallback PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/pet
+)
+
+target_link_libraries(test_lipsync_fallback PRIVATE
+    Qt6::Test
+    Qt6::Core
+)
+
+add_test(NAME test_lipsync_fallback
+    COMMAND test_lipsync_fallback
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)

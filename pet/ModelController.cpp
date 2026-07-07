@@ -366,33 +366,78 @@ void ModelController::loadAutoTapMotions()
 }
 
 // ====================================================================
-// 🗣️ LipSync 参数加载（使用 SDK GetLipSyncParameterCount/Id）
+// 🗣️ 实际参数目录枚举（替代 GetParameterIndex 存在性判断）
+// ====================================================================
+
+void ModelController::rebuildActualParameterMap()
+{
+    m_actualParameterMap.clear();
+    if (!_model) {
+        qWarning() << "[LipSync] _model 为空，无法枚举参数目录";
+        return;
+    }
+
+    const Csm::csmInt32 count = _model->GetParameterCount();
+    for (Csm::csmInt32 i = 0; i < count; i++) {
+        const Csm::CubismIdHandle id = _model->GetParameterId(i);
+        if (id) {
+            m_actualParameterMap.insert(id, static_cast<int>(i));
+        }
+    }
+
+    qInfo().noquote()
+        << QStringLiteral("[LipSync] 已枚举 %1 个实际模型参数").arg(count);
+}
+
+int ModelController::findActualParameterIndex(Csm::CubismIdHandle id) const
+{
+    return findParamIndexInMap(m_actualParameterMap, id);
+}
+
+// ====================================================================
+// 🗣️ LipSync 参数加载与 fallback 配置
 // ====================================================================
 
 void ModelController::loadLipSyncGroup()
 {
+    // ── 清除所有之前的状态 ──
     m_lipSyncIds.Clear();
+    m_lipSyncFallbackParams.clear();
+    m_lipSyncSidecarPath.clear();
+    m_lipSyncSource = LipSyncParameterSource::Disabled;
     m_lipSyncSupported = false;
+    m_lipSyncEnvelope.reset();
+    m_isSpeaking = false;
 
     if (!_modelJson) {
-        qInfo() << "[LipSync] _modelJson 为空，无法加载 LipSync 参数";
+        qInfo() << "[LipSync] _modelJson 为空，无法加载";
         return;
     }
 
-    const Csm::csmInt32 count = _modelJson->GetLipSyncParameterCount();
-    if (count <= 0) {
-        qInfo() << "[LipSync] 模型无 LipSync 参数组，嘴型同步已禁用";
-        return;
-    }
+    // ★ 重建实际参数目录（替代 GetParameterIndex 存在性判断）
+    rebuildActualParameterMap();
 
-    for (Csm::csmInt32 i = 0; i < count; i++) {
-        Csm::CubismIdHandle id = _modelJson->GetLipSyncParameterId(i);
-        if (id) {
+    // ── 尝试标准组 ──
+    const Csm::csmInt32 declaredCount = _modelJson->GetLipSyncParameterCount();
+    int validCount = 0;
+
+    for (Csm::csmInt32 i = 0; i < declaredCount; i++) {
+        const Csm::CubismIdHandle id = _modelJson->GetLipSyncParameterId(i);
+        if (!id) continue;
+
+        // ★ 通过实际参数目录校验：参数必须在模型中真实存在
+        if (findActualParameterIndex(id) >= 0) {
             m_lipSyncIds.PushBack(id);
+            validCount++;
+        } else {
+            qWarning().noquote()
+                << QStringLiteral("[LipSync] 标准参数 \"%1\" 在模型中不存在，跳过")
+                       .arg(QString::fromUtf8(id->GetString().GetRawString()));
         }
     }
 
-    if (m_lipSyncIds.GetSize() > 0) {
+    if (validCount > 0) {
+        m_lipSyncSource = LipSyncParameterSource::StandardGroup;
         m_lipSyncSupported = true;
         m_lipSyncEnvelope.reset();
         m_isSpeaking = false;
@@ -402,17 +447,177 @@ void ModelController::loadLipSyncGroup()
         for (Csm::csmUint32 i = 0; i < m_lipSyncIds.GetSize(); i++) {
             idNames.append(QString::fromUtf8(m_lipSyncIds[i]->GetString().GetRawString()));
         }
-        qInfo().noquote() << QStringLiteral("[LipSync] 已加载 %1 个 LipSync 参数:")
-                             .arg(m_lipSyncIds.GetSize()) << idNames;
+        qInfo().noquote() << QStringLiteral("[LipSync] 标准组有效: %1/%2 个参数")
+                             .arg(validCount).arg(declaredCount) << idNames;
+
+        if (validCount < declaredCount) {
+            qWarning().noquote()
+                << QStringLiteral("[LipSync] 标准组声明 %1 个参数，其中 %2 个在模型中不存在")
+                       .arg(declaredCount).arg(declaredCount - validCount);
+        }
+        return;
+    }
+
+    // ── 标准组无效或不存在 → 尝试 sidecar fallback ──
+    if (declaredCount > 0) {
+        qInfo().noquote()
+            << QStringLiteral("[LipSync] 标准组声明 %1 个参数但全部无效，尝试 fallback")
+                   .arg(declaredCount);
     } else {
-        m_lipSyncSupported = false;
-        qInfo() << "[LipSync] LipSync 参数组为空，嘴型同步已禁用";
+        qInfo() << "[LipSync] 模型无 LipSync 标准组，尝试 fallback";
+    }
+    loadLipSyncFallback();
+}
+
+// ====================================================================
+// 🗣️ Sidecar fallback 配置加载
+// ====================================================================
+
+void ModelController::loadLipSyncFallback()
+{
+    // ★ 使用独立函数推导 sidecar 路径
+    const QString model3Dir = QString::fromStdString(_currentModelDirectory);
+    const QString model3BaseName = QString::fromStdString(_modelDirName);
+    const QString sidecarPath = deriveLipSyncSidecarPath(model3Dir, model3BaseName);
+    m_lipSyncSidecarPath = sidecarPath;
+
+    qInfo().noquote() << QStringLiteral("[LipSync] sidecar 路径: %1").arg(sidecarPath);
+
+    QFileInfo fi(sidecarPath);
+    if (!fi.exists()) {
+        qInfo() << "[LipSync] sidecar 不存在，LipSync 已禁用";
+        dumpModelParameterDirectory();
+        return;
+    }
+
+    qInfo() << "[LipSync] sidecar 存在，尝试加载";
+
+    QFile file(sidecarPath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        qWarning() << "[LipSync] 无法读取 sidecar:" << sidecarPath;
+        dumpModelParameterDirectory();
+        return;
+    }
+
+    const QByteArray data = file.readAll();
+    file.close();
+
+    // 解析配置
+    QString error;
+    const LipSyncConfig cfg = parseLipSyncConfig(data, &error);
+    if (!error.isEmpty()) {
+        qWarning().noquote()
+            << QStringLiteral("[LipSync] sidecar 解析失败: %1").arg(error);
+        dumpModelParameterDirectory();
+        return;
+    }
+
+    if (cfg.parameters.isEmpty()) {
+        qInfo() << "[LipSync] sidecar 参数列表为空，LipSync 已禁用";
+        dumpModelParameterDirectory();
+        return;
+    }
+
+    // 逐项验证并与实际模型参数绑定
+    int resolvedCount = 0;
+    for (const auto& paramCfg : cfg.parameters) {
+        // 通过 ID 管理器查找或注册该 ID
+        const Csm::CubismIdHandle id = CubismFramework::GetIdManager()
+                                    ->GetId(paramCfg.id.toStdString().c_str());
+        if (!id) {
+            qWarning().noquote()
+                << QStringLiteral("[LipSync] fallback 无法创建参数 ID \"%1\"，跳过")
+                       .arg(paramCfg.id);
+            continue;
+        }
+
+        // ★ 通过实际参数目录校验，而非 GetParameterIndex
+        const Csm::csmInt32 idx = findActualParameterIndex(id);
+        if (idx < 0) {
+            qWarning().noquote()
+                << QStringLiteral("[LipSync] fallback 参数 \"%1\" 在模型中不存在，跳过")
+                       .arg(paramCfg.id);
+            continue;
+        }
+
+        ResolvedLipSyncParam resolved;
+        resolved.id          = paramCfg.id;
+        resolved.index       = idx;
+        resolved.modelMin    = _model->GetParameterMinimumValue(idx);
+        resolved.modelMax    = _model->GetParameterMaximumValue(idx);
+        resolved.modelDefault = _model->GetParameterDefaultValue(idx);
+
+        // 将 closed/open 钳制到模型真实范围
+        resolved.closed = qBound(resolved.modelMin,
+                                  static_cast<float>(paramCfg.closed),
+                                  resolved.modelMax);
+        resolved.open   = qBound(resolved.modelMin,
+                                  static_cast<float>(paramCfg.open),
+                                  resolved.modelMax);
+        resolved.weight = static_cast<float>(paramCfg.weight);
+
+        m_lipSyncFallbackParams.append(resolved);
+        resolvedCount++;
+
+        qInfo().noquote()
+            << QStringLiteral("[LipSync]   ✓ fallback 参数 \"%1\" index=%2 "
+                              "range=[%3,%4] closed=%5 open=%6 weight=%7")
+                   .arg(paramCfg.id).arg(idx)
+                   .arg(resolved.modelMin).arg(resolved.modelMax)
+                   .arg(resolved.closed).arg(resolved.open)
+                   .arg(resolved.weight);
+    }
+
+    if (resolvedCount > 0) {
+        m_lipSyncSource = LipSyncParameterSource::ExternalConfig;
+        m_lipSyncSupported = true;
+        m_lipSyncEnvelope.reset();
+        m_isSpeaking = false;
+
+        qInfo().noquote()
+            << QStringLiteral("[LipSync] fallback 已启用: %1 个 resolved 参数")
+                   .arg(resolvedCount);
+    } else {
+        qInfo() << "[LipSync] fallback 无有效参数，LipSync 已禁用";
+        dumpModelParameterDirectory();
     }
 }
 
 // ====================================================================
-// 🗣️ 说话状态设置
+// 📋 模型参数目录诊断（无有效 LipSync 时输出）
 // ====================================================================
+
+void ModelController::dumpModelParameterDirectory()
+{
+    if (!_model) {
+        qInfo() << "[LipSync] 模型未加载，无法输出参数目录";
+        return;
+    }
+
+    const Csm::csmInt32 count = _model->GetParameterCount();
+    qInfo().noquote()
+        << QStringLiteral("[LipSync] ===== 完整模型参数目录 (共 %1 个) =====").arg(count);
+
+    for (Csm::csmInt32 i = 0; i < count; i++) {
+        const Csm::CubismIdHandle id = _model->GetParameterId(i);
+        if (!id) continue;
+
+        const float minVal  = _model->GetParameterMinimumValue(i);
+        const float maxVal  = _model->GetParameterMaximumValue(i);
+        const float defVal  = _model->GetParameterDefaultValue(i);
+        const float curVal  = _model->GetParameterValue(i);
+
+        qInfo().noquote()
+            << QStringLiteral("[LipSync]   [%1] %2  min=%3 max=%4 default=%5 current=%6")
+                   .arg(i)
+                   .arg(QString::fromUtf8(id->GetString().GetRawString()))
+                   .arg(minVal, 0, 'f', 4)
+                   .arg(maxVal, 0, 'f', 4)
+                   .arg(defVal, 0, 'f', 4)
+                   .arg(curVal, 0, 'f', 4);
+    }
+    qInfo().noquote() << QStringLiteral("[LipSync] =========================================");
+}
 
 void ModelController::setSpeaking(bool speaking)
 {
@@ -506,31 +711,50 @@ void ModelController::ModelParamUpdate()
     _model->SetParameterValue(_idParamBrowRAngle, m_currentBrowAngle);
 
     // ★ LipSync 嘴型写入（在情绪之后、用户覆写之前）
-    //    说话时覆盖嘴部参数，停止后释放控制权给情绪系统。
+    //    StandardGroup 与 ExternalConfig 互斥，永远不同时启用。
     if (m_lipSyncSupported)
     {
         // 更新包络（说话时随机张嘴闭嘴，停止后平滑归零）
         const Csm::csmFloat32 lipDt = LAppPal::GetDeltaTime();
         const float lipVal = m_lipSyncEnvelope.update(lipDt);
 
-        // 有有效嘴型值时写入所有 LipSync 参数
-        // 归零后跳过写入，让同一帧中情绪系统设置的值生效
-        if (lipVal > 0.005f)
+        if (m_lipSyncSource == LipSyncParameterSource::StandardGroup)
         {
-            for (Csm::csmUint32 i = 0; i < m_lipSyncIds.GetSize(); i++)
+            // ── 标准组写入 ──
+            // 保持现有视觉行为，仅当 envelope > 阈值时写入。
+            if (lipVal > 0.005f)
             {
-                const Csm::CubismIdHandle id = m_lipSyncIds[i];
-                if (!id) continue;
+                for (Csm::csmUint32 i = 0; i < m_lipSyncIds.GetSize(); i++)
+                {
+                    const Csm::CubismIdHandle id = m_lipSyncIds[i];
+                    if (!id) continue;
 
-                const Csm::csmInt32 paramIdx = _model->GetParameterIndex(id);
-                if (paramIdx < 0) continue;
+                    // ★ 使用实际参数目录的 index，避免调用 GetParameterIndex
+                    const Csm::csmInt32 paramIdx = findActualParameterIndex(id);
+                    if (paramIdx < 0) continue;
 
-                // 约束到模型参数范围
-                const float minVal = _model->GetParameterMinimumValue(paramIdx);
-                const float maxVal = _model->GetParameterMaximumValue(paramIdx);
-                const float clamped = qBound(minVal, lipVal, maxVal);
+                    // 约束到模型参数范围
+                    const float minVal = _model->GetParameterMinimumValue(paramIdx);
+                    const float maxVal = _model->GetParameterMaximumValue(paramIdx);
+                    const float clamped = qBound(minVal, lipVal, maxVal);
 
-                _model->SetParameterValue(paramIdx, clamped);
+                    _model->SetParameterValue(paramIdx, clamped);
+                }
+            }
+        }
+        else if (m_lipSyncSource == LipSyncParameterSource::ExternalConfig)
+        {
+            // ── Fallback sidecar 写入 ──
+            // 说话期间即使包络为 0（闭嘴阶段）也写入 mapped closed 值，
+            // 停止说话后包络平滑归零期间继续写入，归零后停止。
+            if (lipSyncShouldWrite(m_isSpeaking, lipVal))
+            {
+                for (const auto& param : m_lipSyncFallbackParams)
+                {
+                    const float mapped = mapLipSyncEnvelope(lipVal, param);
+                    const float clamped = qBound(param.modelMin, mapped, param.modelMax);
+                    _model->SetParameterValue(param.index, clamped);
+                }
             }
         }
     }
