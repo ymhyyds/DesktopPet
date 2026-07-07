@@ -347,3 +347,127 @@ void TtsEngineTest::testDestructorCleanup()
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Speaking state transitions
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ── stop() on idle engine → no signal emitted (dedup works) ──
+void TtsEngineTest::testStopOnIdleEngine()
+{
+    QSignalSpy startedSpy(s_engine, &TtsEngine::speakingStarted);
+    QSignalSpy finishedSpy(s_engine, &TtsEngine::speakingFinished);
+    QSignalSpy interruptedSpy(s_engine, &TtsEngine::speakingInterrupted);
+
+    s_engine->stop();
+
+    QCOMPARE(startedSpy.count(), 0);
+    QCOMPARE(finishedSpy.count(), 0);
+    QCOMPARE(interruptedSpy.count(), 0);
+}
+
+// ── speak() (mock in-flight) → stop() → exactly one speakingInterrupted ──
+void TtsEngineTest::testInterruptOnStop()
+{
+    QSignalSpy startedSpy(s_engine, &TtsEngine::speakingStarted);
+    QSignalSpy finishedSpy(s_engine, &TtsEngine::speakingFinished);
+    QSignalSpy interruptedSpy(s_engine, &TtsEngine::speakingInterrupted);
+
+    s_engine->stop();
+    QVERIFY(ourTempSubdirs().isEmpty());
+
+    s_vvMock.setDelay(500);
+    s_engine->speak(QStringLiteral("interrupt stop test"));
+    QTest::qWait(80);
+
+    // Stop while synthesis in-flight
+    s_engine->stop();
+    QTest::qWait(200);
+
+    // Should have exactly one speakingInterrupted
+    QCOMPARE(interruptedSpy.count(), 1);
+    // No speakingStarted (mock response hasn't completed → no real playback)
+    QCOMPARE(startedSpy.count(), 0);
+    // No speakingFinished (stopped before natural end)
+    QCOMPARE(finishedSpy.count(), 0);
+}
+
+// ── speak() → setEnabled(false) → exactly one speakingInterrupted ──
+void TtsEngineTest::testInterruptOnDisable()
+{
+    QSignalSpy interruptedSpy(s_engine, &TtsEngine::speakingInterrupted);
+
+    s_vvMock.setDelay(500);
+    s_engine->speak(QStringLiteral("interrupt disable test"));
+    QTest::qWait(80);
+
+    s_engine->setEnabled(false);
+    QTest::qWait(200);
+
+    QCOMPARE(interruptedSpy.count(), 1);
+
+    s_engine->setEnabled(true);
+}
+
+// ── speak() → setBackend(other) → exactly one speakingInterrupted ──
+void TtsEngineTest::testInterruptOnBackendSwitch()
+{
+    QSignalSpy interruptedSpy(s_engine, &TtsEngine::speakingInterrupted);
+
+    s_vvMock.setDelay(500);
+    s_engine->speak(QStringLiteral("interrupt backend test"));
+    QTest::qWait(80);
+
+    // Switch backend (EdgeTts → VoiceVox is same, but triggers stop)
+    s_engine->setBackend(TtsEngine::EdgeTts);
+    QTest::qWait(200);
+
+    QCOMPARE(interruptedSpy.count(), 1);
+
+    // Restore for subsequent tests
+    s_engine->setBackend(TtsEngine::VoiceVox);
+    s_engine->setVoiceVoxUrl(s_vvMock.baseUrl());
+}
+
+// ── speak() → speak() → at most one speakingInterrupted (dedup) ──
+void TtsEngineTest::testConsecutiveSpeakNoDuplicateInterrupt()
+{
+    QSignalSpy interruptedSpy(s_engine, &TtsEngine::speakingInterrupted);
+
+    s_engine->stop();
+    QVERIFY(ourTempSubdirs().isEmpty());
+
+    s_vvMock.setDelay(500);
+    s_engine->speak(QStringLiteral("first request"));
+    QTest::qWait(50);
+
+    // Mock server errors intentionally reset for second speak
+    s_vvMock.setDelay(0);
+    s_engine->speak(QStringLiteral("second request"));
+    QTest::qWait(200);
+
+    // First speak's setSpeakingState(false, false) emits interrupted;
+    // second speak's setSpeakingState(false, false) sees m_isSpeaking already
+    // false → no duplicate emission.
+    QCOMPARE(interruptedSpy.count(), 1);
+}
+
+// ── speak() → stop() → speak() → only 1 speakingInterrupted ──
+void TtsEngineTest::testSpeakAfterStopNoExtraInterrupt()
+{
+    QSignalSpy interruptedSpy(s_engine, &TtsEngine::speakingInterrupted);
+
+    s_vvMock.setDelay(500);
+    s_engine->speak(QStringLiteral("first"));
+    QTest::qWait(80);
+
+    s_engine->stop();  // → 1st speakingInterrupted
+    QCOMPARE(interruptedSpy.count(), 1);
+
+    // Speak again (while idle engine) → should NOT emit extra interrupted
+    s_vvMock.setDelay(0);
+    s_engine->speak(QStringLiteral("second"));
+    QTest::qWait(200);
+
+    QCOMPARE(interruptedSpy.count(), 1);
+}

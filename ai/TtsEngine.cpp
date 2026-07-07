@@ -279,8 +279,14 @@ void TtsEngine::speak(const QString &text)
     m_generation++;
     const int gen = m_generation;
 
-    // 新 speak 打断旧播放（如果有正在播放的音频）
-    setSpeakingState(false, false); // speakingInterrupted
+    // 新 speak 打断旧播放或进行中的合成（不依赖 m_isSpeaking）
+    const bool hasReq = m_isSpeaking
+        || (m_vvClient && m_vvClient->hasPendingRequests())
+        || (m_edgeProcess && m_edgeProcess->state() != QProcess::NotRunning);
+    if (hasReq) {
+        m_isSpeaking = false;
+        emit speakingInterrupted();
+    }
 
     // 停止当前播放和合成
     stopPlayer();
@@ -307,7 +313,13 @@ void TtsEngine::speak(const QString &text)
 void TtsEngine::stop()
 {
     m_generation++;
-    setSpeakingState(false, false); // speakingInterrupted
+    const bool hasReq = m_isSpeaking
+        || (m_vvClient && m_vvClient->hasPendingRequests())
+        || (m_edgeProcess && m_edgeProcess->state() != QProcess::NotRunning);
+    if (hasReq) {
+        m_isSpeaking = false;
+        emit speakingInterrupted();
+    }
     stopPlayer();
     killEdgeProcess();
     m_vvClient->cancelPendingRequests();

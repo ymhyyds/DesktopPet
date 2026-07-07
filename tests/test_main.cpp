@@ -49,6 +49,14 @@ private slots:
     void testLatestWins();
     void testThreeConsecutiveRequests();
     void testDestructorCleanup();
+
+    // ── Speaking state transitions ──
+    void testStopOnIdleEngine();
+    void testInterruptOnStop();
+    void testInterruptOnDisable();
+    void testInterruptOnBackendSwitch();
+    void testConsecutiveSpeakNoDuplicateInterrupt();
+    void testSpeakAfterStopNoExtraInterrupt();
 };
 
 class EdgeTtsEngineTest : public QObject {

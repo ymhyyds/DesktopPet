@@ -197,3 +197,31 @@ add_test(NAME test_expression
     COMMAND test_expression
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# ── LipSync Envelope Unit Tests ──────────────────────────────────────────
+# Pure logic tests for the lip-sync envelope algorithm.
+# No Cubism SDK, no OpenGL, no Qt Multimedia, no mock server.
+
+add_executable(test_lipsync
+    ${CMAKE_CURRENT_SOURCE_DIR}/LipSyncEnvelopeTest.cpp
+    ${CMAKE_SOURCE_DIR}/pet/LipSyncEnvelope.cpp
+)
+
+set_target_properties(test_lipsync PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_lipsync PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/pet
+)
+
+target_link_libraries(test_lipsync PRIVATE
+    Qt6::Test
+    Qt6::Core
+)
+
+add_test(NAME test_lipsync
+    COMMAND test_lipsync
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
