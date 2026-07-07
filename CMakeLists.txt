@@ -330,12 +330,14 @@ if(EXISTS "${LIVE2D_SDK_ROOT}")
         LIVE2D_RESOURCES_PATH="${LIVE2D_RESOURCES_PATH}/"
     )
     target_sources(DesktopPet PRIVATE
+        pet/EmotionParameterResolver.h
+        pet/EmotionParameterResolver.cpp
+        pet/LipSyncEnvelope.h
+        pet/LipSyncEnvelope.cpp
         pet/Live2DView.h
         pet/Live2DView.cpp
         pet/ModelController.hpp
         pet/ModelController.cpp
-        pet/LipSyncEnvelope.h
-        pet/LipSyncEnvelope.cpp
     )
 
     message(STATUS "[DesktopPet] Live2D Cubism SDK 已接入：${LIVE2D_SDK_ROOT}")

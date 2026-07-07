@@ -13,6 +13,7 @@
 #include "PetAnimationState.h"
 #include "LipSyncEnvelope.h"
 #include "LipSyncConfig.h"
+#include "EmotionParameterResolver.h"
 
 /**
  * @brief ModelController — CubismUserModelExtend 的增强版。
@@ -245,6 +246,17 @@ private:
     // 当情绪变化时，记录切换时刻用于过渡
     float m_emotionSwitchTime = 0.0f;
 
+    // ====================================================================
+    // 🎭 已解析的情绪参数（加载时绑定一次，非每帧搜索 ID）
+    // ====================================================================
+    EmotionMouthSource m_emotionMouthSource = EmotionMouthSource::Disabled;
+    QVector<ResolvedEmotionParameter> m_emotionMouthParams; // 空 = disabled
+    ResolvedEmotionParameter m_emotionCheek;
+    ResolvedEmotionParameter m_emotionBrowLY;
+    ResolvedEmotionParameter m_emotionBrowRY;
+    ResolvedEmotionParameter m_emotionBrowLAngle;
+    ResolvedEmotionParameter m_emotionBrowRAngle;
+
     // 模型位置偏移（归一化坐标，用于微调模型在窗口中的位置）
     float m_offsetX = 0.0f;
     float m_offsetY = 0.0f;
@@ -295,6 +307,14 @@ private:
     QString m_lipSyncSidecarPath;
     /// fallback resolved 参数列表（仅当 source==ExternalConfig 时有效）
     QVector<ResolvedLipSyncParam> m_lipSyncFallbackParams;
+
+    /// 解析并绑定情绪参数（在 loadLipSyncGroup 之后调用）
+    void resolveEmotionParams();
+
+    /// 写入单个情绪通道（仅当 mapped 时，钳制到真实范围）
+    void writeEmotionChannel(const ResolvedEmotionParameter& param, float value);
+    /// 写入嘴部情绪参数（处理 ExternalConfig 映射 + 所有 mouth params）
+    void writeEmotionMouth(float value);
 
     /// 尝试加载 sidecar fallback 配置（在标准组无效时调用）
     void loadLipSyncFallback();

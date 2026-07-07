@@ -254,3 +254,32 @@ add_test(NAME test_lipsync_fallback
     COMMAND test_lipsync_fallback
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# ── Emotion Parameter Resolver Unit Tests ────────────────────────────
+# Pure logic tests for emotion parameter resolution (mouth source, cheek/brow existence).
+# No Cubism SDK, no OpenGL, no Qt Multimedia, no mock server.
+# Only Qt6::Test + Qt6::Core (via EmotionParameterResolver.h).
+
+add_executable(test_emotion_parameters
+    ${CMAKE_CURRENT_SOURCE_DIR}/EmotionParameterResolverTest.cpp
+    ${CMAKE_SOURCE_DIR}/pet/EmotionParameterResolver.cpp
+)
+
+set_target_properties(test_emotion_parameters PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_emotion_parameters PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/pet
+)
+
+target_link_libraries(test_emotion_parameters PRIVATE
+    Qt6::Test
+    Qt6::Core
+)
+
+add_test(NAME test_emotion_parameters
+    COMMAND test_emotion_parameters
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)

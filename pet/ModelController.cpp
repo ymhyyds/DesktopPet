@@ -234,6 +234,9 @@ void ModelController::SetupModel(csmUint32 width, csmUint32 height)
     // ★ 从 model3.json 读取 LipSync 参数组（SDK GetLipSyncParameterCount/Id）
     loadLipSyncGroup();
 
+    // ★ 解析并绑定情绪参数（依赖 loadLipSyncGroup 建立的 m_actualParameterMap 和 lip sync 来源）
+    resolveEmotionParams();
+
     _updating = false;
     _initialized = true;
 }
@@ -392,6 +395,185 @@ void ModelController::rebuildActualParameterMap()
 int ModelController::findActualParameterIndex(Csm::CubismIdHandle id) const
 {
     return findParamIndexInMap(m_actualParameterMap, id);
+}
+
+// ====================================================================
+// 🎭 情绪参数解析与绑定（模型加载时调用一次）
+// ====================================================================
+
+void ModelController::resolveEmotionParams()
+{
+    // ── 重置 ──
+    m_emotionMouthSource = EmotionMouthSource::Disabled;
+    m_emotionMouthParams.clear();
+    m_emotionCheek = {};
+    m_emotionBrowLY = {};
+    m_emotionBrowRY = {};
+    m_emotionBrowLAngle = {};
+    m_emotionBrowRAngle = {};
+
+    if (!_model) {
+        qInfo() << "[Emotion] _model 为空，情绪参数已禁用";
+        return;
+    }
+
+    // ── 建立参数名列表（从实际模型目录） ──
+    QStringList actualNames;
+    const Csm::csmInt32 paramCount = _model->GetParameterCount();
+    for (Csm::csmInt32 i = 0; i < paramCount; i++) {
+        const auto id = _model->GetParameterId(i);
+        if (id) {
+            actualNames.append(QString::fromUtf8(id->GetString().GetRawString()));
+        }
+    }
+
+    // ── StandardGroup 参数 ID 字符串列表 ──
+    QStringList standardIds;
+    for (Csm::csmUint32 i = 0; i < m_lipSyncIds.GetSize(); i++) {
+        if (m_lipSyncIds[i]) {
+            standardIds.append(QString::fromUtf8(m_lipSyncIds[i]->GetString().GetRawString()));
+        }
+    }
+
+    // ── 调用纯逻辑解析函数 ──
+    const auto resolved = resolveEmotionParameters(
+        actualNames,
+        static_cast<int>(m_lipSyncSource),
+        standardIds,
+        m_lipSyncSource == LipSyncParameterSource::ExternalConfig);
+
+    m_emotionMouthSource = resolved.mouthSource;
+
+    // ── 绑定辅助 lambda ──
+    auto bindParam = [&](const ResolvedEmotionParameter& stub, bool isMouth = false) -> ResolvedEmotionParameter {
+        if (!stub.mapped) return {};  // 未映射 → 返回空（index=-1, mapped=false）
+        const auto cubismId = CubismFramework::GetIdManager()
+            ->GetId(stub.id.toStdString().c_str());
+        const int idx = findActualParameterIndex(cubismId);
+        if (idx < 0) return {};
+        ResolvedEmotionParameter p;
+        p.id     = stub.id;
+        p.index  = idx;
+        p.minimum = _model->GetParameterMinimumValue(idx);
+        p.maximum = _model->GetParameterMaximumValue(idx);
+        p.defaultValue = _model->GetParameterDefaultValue(idx);
+        p.mapped = true;
+        p.isMouth = isMouth;
+        // 非 ExternalConfig 的嘴部参数直接使用模型范围；ExternalConfig 在下面单独处理
+        p.closed = p.minimum;
+        p.open   = p.maximum;
+        p.weight = 1.0f;
+        return p;
+    };
+
+    // ── 嘴部参数绑定 ──
+    if (resolved.mouthSource == EmotionMouthSource::ExternalLipSyncConfig) {
+        // ExternalConfig：直接复用 m_lipSyncFallbackParams（已有 index/range/closed/open/weight）
+        for (const auto& fb : m_lipSyncFallbackParams) {
+            ResolvedEmotionParameter p;
+            p.id     = fb.id;
+            p.index  = fb.index;
+            p.minimum = fb.modelMin;
+            p.maximum = fb.modelMax;
+            p.defaultValue = fb.modelDefault;
+            p.mapped = true;
+            p.isMouth = true;
+            p.closed = fb.closed;
+            p.open   = fb.open;
+            p.weight = fb.weight;
+            m_emotionMouthParams.append(p);
+        }
+    } else {
+        // StandardGroup / ParamMouthOpenY：通过 stub 绑定
+        for (const auto& stub : resolved.mouthParams) {
+            auto bound = bindParam(stub, true);
+            if (bound.mapped) {
+                m_emotionMouthParams.append(bound);
+            }
+        }
+    }
+
+    // ── 其他情绪参数绑定 ──
+    m_emotionCheek      = bindParam(resolved.cheek);
+    m_emotionBrowLY     = bindParam(resolved.browLY);
+    m_emotionBrowRY     = bindParam(resolved.browRY);
+    m_emotionBrowLAngle = bindParam(resolved.browLAngle);
+    m_emotionBrowRAngle = bindParam(resolved.browRAngle);
+
+    // ── 加载阶段日志 ──
+    QString mouthSrcStr;
+    switch (m_emotionMouthSource) {
+        case EmotionMouthSource::StandardLipSyncGroup:  mouthSrcStr = QStringLiteral("StandardLipSyncGroup"); break;
+        case EmotionMouthSource::ExternalLipSyncConfig: mouthSrcStr = QStringLiteral("ExternalLipSyncConfig"); break;
+        case EmotionMouthSource::ParamMouthOpenY:       mouthSrcStr = QStringLiteral("ParamMouthOpenY"); break;
+        default:                                         mouthSrcStr = QStringLiteral("Disabled"); break;
+    }
+
+    QStringList mouthNames;
+    for (const auto& p : m_emotionMouthParams) {
+        mouthNames << QStringLiteral("%1[%2](%3..%4)")
+            .arg(p.id).arg(p.index).arg(p.minimum).arg(p.maximum);
+    }
+
+    qInfo().noquote()
+        << QStringLiteral("[Emotion] resolved mouth source: %1 (params: %2)")
+               .arg(mouthSrcStr)
+               .arg(m_emotionMouthParams.isEmpty()
+                    ? QStringLiteral("none")
+                    : mouthNames.join(QStringLiteral(", ")));
+
+    auto logChannel = [](const QString& name, const ResolvedEmotionParameter& p) {
+        if (p.mapped) {
+            qInfo().noquote()
+                << QStringLiteral("[Emotion]   %1 enabled [%2](%3..%4)")
+                       .arg(name).arg(p.index).arg(p.minimum).arg(p.maximum);
+        } else {
+            qInfo().noquote() << QStringLiteral("[Emotion]   %1 disabled").arg(name);
+        }
+    };
+
+    logChannel(QStringLiteral("cheek"),      m_emotionCheek);
+    logChannel(QStringLiteral("browLY"),     m_emotionBrowLY);
+    logChannel(QStringLiteral("browRY"),     m_emotionBrowRY);
+    logChannel(QStringLiteral("browLAngle"), m_emotionBrowLAngle);
+    logChannel(QStringLiteral("browRAngle"), m_emotionBrowRAngle);
+}
+
+// ====================================================================
+// 🖊️ 情绪通道写入辅助
+// ====================================================================
+
+void ModelController::writeEmotionChannel(const ResolvedEmotionParameter& param, float value)
+{
+    if (!param.mapped || param.index < 0) return;
+    const float clamped = qBound(param.minimum, value, param.maximum);
+    _model->SetParameterValue(static_cast<Csm::csmInt32>(param.index), clamped);
+}
+
+void ModelController::writeEmotionMouth(float value)
+{
+    if (m_emotionMouthParams.isEmpty()) return;
+
+    for (const auto& param : m_emotionMouthParams) {
+        if (!param.mapped || param.index < 0) continue;
+
+        float finalVal;
+        if (m_emotionMouthSource == EmotionMouthSource::ExternalLipSyncConfig) {
+            // ExternalConfig：使用 closed/open/weight 映射
+            LipSyncParameterConfig cfg;
+            cfg.id     = param.id;
+            cfg.closed = static_cast<double>(param.closed);
+            cfg.open   = static_cast<double>(param.open);
+            cfg.weight = static_cast<double>(param.weight);
+            finalVal = mapLipSyncEnvelope(value, cfg);
+        } else {
+            // StandardGroup / ParamMouthOpenY：直接使用情绪值
+            finalVal = value;
+        }
+
+        finalVal = qBound(param.minimum, finalVal, param.maximum);
+        _model->SetParameterValue(static_cast<Csm::csmInt32>(param.index), finalVal);
+    }
 }
 
 // ====================================================================
@@ -702,13 +884,13 @@ void ModelController::ModelParamUpdate()
         }
     }
 
-    // 情绪表情再补一次（安全兜底）
-    _model->SetParameterValue(_idParamMouthOpenY, m_currentMouthOpen);
-    _model->SetParameterValue(_idParamCheek,      m_currentCheek);
-    _model->SetParameterValue(_idParamBrowLY,     m_currentBrowLY);
-    _model->SetParameterValue(_idParamBrowRY,     m_currentBrowRY);
-    _model->SetParameterValue(_idParamBrowLAngle, m_currentBrowAngle);
-    _model->SetParameterValue(_idParamBrowRAngle, m_currentBrowAngle);
+    // 情绪表情再补一次（安全兜底，使用已解析的真实参数 index）
+    writeEmotionMouth(m_currentMouthOpen);
+    writeEmotionChannel(m_emotionCheek,      m_currentCheek);
+    writeEmotionChannel(m_emotionBrowLY,     m_currentBrowLY);
+    writeEmotionChannel(m_emotionBrowRY,     m_currentBrowRY);
+    writeEmotionChannel(m_emotionBrowLAngle, m_currentBrowAngle);
+    writeEmotionChannel(m_emotionBrowRAngle, m_currentBrowAngle);
 
     // ★ LipSync 嘴型写入（在情绪之后、用户覆写之前）
     //    StandardGroup 与 ExternalConfig 互斥，永远不同时启用。
@@ -1619,12 +1801,13 @@ void ModelController::applyOverrideParameters()
     m_currentBrowRY    = lerp(m_currentBrowRY,    m_targetBrowRY,    emotionLerpSpeed * deltaTime);
     m_currentBrowAngle = lerp(m_currentBrowAngle, m_targetBrowAngle, emotionLerpSpeed * deltaTime);
 
-    _model->SetParameterValue(_idParamMouthOpenY, m_currentMouthOpen);
-    _model->SetParameterValue(_idParamCheek,      m_currentCheek);
-    _model->SetParameterValue(_idParamBrowLY,     m_currentBrowLY);
-    _model->SetParameterValue(_idParamBrowRY,     m_currentBrowRY);
-    _model->SetParameterValue(_idParamBrowLAngle, m_currentBrowAngle);
-    _model->SetParameterValue(_idParamBrowRAngle, m_currentBrowAngle);
+    // ★ ★ 使用已解析的真实参数 index 写入（不存在的参数不写入）
+    writeEmotionMouth(m_currentMouthOpen);
+    writeEmotionChannel(m_emotionCheek,      m_currentCheek);
+    writeEmotionChannel(m_emotionBrowLY,     m_currentBrowLY);
+    writeEmotionChannel(m_emotionBrowRY,     m_currentBrowRY);
+    writeEmotionChannel(m_emotionBrowLAngle, m_currentBrowAngle);
+    writeEmotionChannel(m_emotionBrowRAngle, m_currentBrowAngle);
 
     // ------------------------------------------------
     // 4. 🛠️ 用户手动覆写参数 — 在情绪/眼动系统之后施加，优先级最高
