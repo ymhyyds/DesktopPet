@@ -76,6 +76,13 @@ public:
     /// 摸摸头动作 — InputProxyWindow 调用
     void triggerPet();
 
+    // ── TTS 嘴型同步 ──
+public slots:
+    void onSpeakingStarted();
+    void onSpeakingFinished();
+    void onSpeakingInterrupted();
+
+public:
     // 动画安全边距比率 — 被 PetWindow/ModelController/Live2DView 共享使用
     static constexpr double kAnimMarginRatio = 0.01;
 

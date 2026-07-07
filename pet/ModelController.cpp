@@ -231,6 +231,9 @@ void ModelController::SetupModel(csmUint32 width, csmUint32 height)
     // 自动加载未在 model3.json 中引用的 .motion3.json 文件作为 TapBody 动作
     loadAutoTapMotions();
 
+    // ★ 从 model3.json 读取 LipSync 参数组（SDK GetLipSyncParameterCount/Id）
+    loadLipSyncGroup();
+
     _updating = false;
     _initialized = true;
 }
@@ -363,8 +366,60 @@ void ModelController::loadAutoTapMotions()
 }
 
 // ====================================================================
-// ModelParamUpdate — 参数更新（原版逻辑不变）
+// 🗣️ LipSync 参数加载（使用 SDK GetLipSyncParameterCount/Id）
 // ====================================================================
+
+void ModelController::loadLipSyncGroup()
+{
+    m_lipSyncIds.Clear();
+    m_lipSyncSupported = false;
+
+    if (!_modelJson) {
+        qInfo() << "[LipSync] _modelJson 为空，无法加载 LipSync 参数";
+        return;
+    }
+
+    const Csm::csmInt32 count = _modelJson->GetLipSyncParameterCount();
+    if (count <= 0) {
+        qInfo() << "[LipSync] 模型无 LipSync 参数组，嘴型同步已禁用";
+        return;
+    }
+
+    for (Csm::csmInt32 i = 0; i < count; i++) {
+        Csm::CubismIdHandle id = _modelJson->GetLipSyncParameterId(i);
+        if (id) {
+            m_lipSyncIds.PushBack(id);
+        }
+    }
+
+    if (m_lipSyncIds.GetSize() > 0) {
+        m_lipSyncSupported = true;
+        m_lipSyncEnvelope.reset();
+        m_isSpeaking = false;
+
+        // 日志输出
+        QStringList idNames;
+        for (Csm::csmUint32 i = 0; i < m_lipSyncIds.GetSize(); i++) {
+            idNames.append(QString::fromUtf8(m_lipSyncIds[i]->GetString().GetRawString()));
+        }
+        qInfo().noquote() << QStringLiteral("[LipSync] 已加载 %1 个 LipSync 参数:")
+                             .arg(m_lipSyncIds.GetSize()) << idNames;
+    } else {
+        m_lipSyncSupported = false;
+        qInfo() << "[LipSync] LipSync 参数组为空，嘴型同步已禁用";
+    }
+}
+
+// ====================================================================
+// 🗣️ 说话状态设置
+// ====================================================================
+
+void ModelController::setSpeaking(bool speaking)
+{
+    if (m_isSpeaking == speaking) return;
+    m_isSpeaking = speaking;
+    m_lipSyncEnvelope.setSpeaking(speaking);
+}
 
 void ModelController::ModelParamUpdate()
 {
@@ -449,6 +504,36 @@ void ModelController::ModelParamUpdate()
     _model->SetParameterValue(_idParamBrowRY,     m_currentBrowRY);
     _model->SetParameterValue(_idParamBrowLAngle, m_currentBrowAngle);
     _model->SetParameterValue(_idParamBrowRAngle, m_currentBrowAngle);
+
+    // ★ LipSync 嘴型写入（在情绪之后、用户覆写之前）
+    //    说话时覆盖嘴部参数，停止后释放控制权给情绪系统。
+    if (m_lipSyncSupported)
+    {
+        // 更新包络（说话时随机张嘴闭嘴，停止后平滑归零）
+        const Csm::csmFloat32 lipDt = LAppPal::GetDeltaTime();
+        const float lipVal = m_lipSyncEnvelope.update(lipDt);
+
+        // 有有效嘴型值时写入所有 LipSync 参数
+        // 归零后跳过写入，让同一帧中情绪系统设置的值生效
+        if (lipVal > 0.005f)
+        {
+            for (Csm::csmUint32 i = 0; i < m_lipSyncIds.GetSize(); i++)
+            {
+                const Csm::CubismIdHandle id = m_lipSyncIds[i];
+                if (!id) continue;
+
+                const Csm::csmInt32 paramIdx = _model->GetParameterIndex(id);
+                if (paramIdx < 0) continue;
+
+                // 约束到模型参数范围
+                const float minVal = _model->GetParameterMinimumValue(paramIdx);
+                const float maxVal = _model->GetParameterMaximumValue(paramIdx);
+                const float clamped = qBound(minVal, lipVal, maxVal);
+
+                _model->SetParameterValue(paramIdx, clamped);
+            }
+        }
+    }
 
     // 用户手动覆写最高优先级，始终在最后
     for (const auto &[index, value] : m_userParameterOverrides) {

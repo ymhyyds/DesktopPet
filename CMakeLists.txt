@@ -332,6 +332,8 @@ if(EXISTS "${LIVE2D_SDK_ROOT}")
         pet/Live2DView.cpp
         pet/ModelController.hpp
         pet/ModelController.cpp
+        pet/LipSyncEnvelope.h
+        pet/LipSyncEnvelope.cpp
     )
 
     message(STATUS "[DesktopPet] Live2D Cubism SDK 已接入：${LIVE2D_SDK_ROOT}")

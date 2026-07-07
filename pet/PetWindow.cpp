@@ -249,6 +249,27 @@ void PetWindow::triggerPet()
     }
 }
 
+void PetWindow::onSpeakingStarted()
+{
+    if (m_live2DView) {
+        m_live2DView->onSpeakingStarted();
+    }
+}
+
+void PetWindow::onSpeakingFinished()
+{
+    if (m_live2DView) {
+        m_live2DView->onSpeakingFinished();
+    }
+}
+
+void PetWindow::onSpeakingInterrupted()
+{
+    if (m_live2DView) {
+        m_live2DView->onSpeakingInterrupted();
+    }
+}
+
 void PetWindow::setKeepOnTop(bool keepOnTop)
 {
     m_keepOnTop = keepOnTop;

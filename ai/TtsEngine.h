@@ -88,7 +88,18 @@ signals:
     /// 正常播放结束（对端是 VoiceVox / Edge TTS 播放的音频自然播完）
     void playbackFinished(int backend);
 
+    // ── 嘴型同步（LipSync）信号 ──
+    /// 音频开始播放（QMediaPlayer 进入 PlayingState）
+    void speakingStarted();
+    /// 音频播放完毕（EndOfMedia 自然结束）
+    void speakingFinished();
+    /// 音频被中断（stop / 新 speak 覆盖 / 错误 / 后端切换）
+    void speakingInterrupted();
+
 private:
+    /// 统一状态切换：仅在状态发生变化时才发射信号，保证每个信号最多发一次
+    void setSpeakingState(bool speaking, bool finished);
+
     void stopPlayer();
     void killEdgeProcess();
     void cleanupTempFiles();
@@ -111,6 +122,9 @@ private:
     bool m_enabled = true;
     int m_generation = 0;
     Backend m_backend = EdgeTts;
+
+    // ── 嘴型同步状态（仅在音频真正播放时为 true） ──
+    bool m_isSpeaking = false;
 
     // --- 统一播放层 (Qt Multimedia) ---
     QMediaPlayer *m_mediaPlayer = nullptr;

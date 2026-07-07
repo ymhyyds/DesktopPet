@@ -29,12 +29,14 @@ TtsEngine::TtsEngine(QObject *parent)
         [this](QMediaPlayer::MediaStatus status) {
             if (status == QMediaPlayer::EndOfMedia) {
                 // 正常播放结束 → 释放 source 后清理文件
+                setSpeakingState(false, true); // speakingFinished
                 m_mediaPlayer->stop();
                 m_mediaPlayer->setSource(QUrl());
                 cleanupTempFiles();
                 emit playbackFinished(static_cast<int>(m_backend));
             } else if (status == QMediaPlayer::InvalidMedia) {
                 qWarning() << "[TtsEngine] 无效媒体文件";
+                setSpeakingState(false, false); // speakingInterrupted
                 emit errorOccurred(static_cast<int>(m_backend),
                     QStringLiteral("音频文件无效或无法加载"));
                 m_mediaPlayer->stop();
@@ -43,9 +45,19 @@ TtsEngine::TtsEngine(QObject *parent)
             }
         });
 
+    // ── 播放状态监测（仅用于 LipSync speakingStarted/Finished 判定） ──
+    connect(m_mediaPlayer, &QMediaPlayer::playbackStateChanged, this,
+        [this](QMediaPlayer::PlaybackState newState) {
+            if (newState == QMediaPlayer::PlayingState && !m_isSpeaking) {
+                // 真正开始播放音频 → 首次进入 PlayingState
+                setSpeakingState(true, false);
+            }
+        });
+
     connect(m_mediaPlayer, &QMediaPlayer::errorOccurred, this,
         [this](QMediaPlayer::Error error, const QString &errorString) {
             qWarning() << "[TtsEngine] 播放器错误:" << error << errorString;
+            setSpeakingState(false, false); // speakingInterrupted
             emit errorOccurred(static_cast<int>(m_backend), errorString);
             m_mediaPlayer->stop();
             m_mediaPlayer->setSource(QUrl());
@@ -267,6 +279,9 @@ void TtsEngine::speak(const QString &text)
     m_generation++;
     const int gen = m_generation;
 
+    // 新 speak 打断旧播放（如果有正在播放的音频）
+    setSpeakingState(false, false); // speakingInterrupted
+
     // 停止当前播放和合成
     stopPlayer();
     killEdgeProcess();
@@ -292,6 +307,7 @@ void TtsEngine::speak(const QString &text)
 void TtsEngine::stop()
 {
     m_generation++;
+    setSpeakingState(false, false); // speakingInterrupted
     stopPlayer();
     killEdgeProcess();
     m_vvClient->cancelPendingRequests();
@@ -318,6 +334,25 @@ bool TtsEngine::isBusy() const
         return true;
 
     return false;
+}
+
+// ============================================================================
+// 统一说话状态切换（保证每个信号只发一次）
+// ============================================================================
+
+void TtsEngine::setSpeakingState(bool speaking, bool finished)
+{
+    if (speaking == m_isSpeaking) return; // 状态未变，不重复发射
+
+    m_isSpeaking = speaking;
+
+    if (speaking) {
+        emit speakingStarted();
+    } else if (finished) {
+        emit speakingFinished();
+    } else {
+        emit speakingInterrupted();
+    }
 }
 
 // ============================================================================

@@ -101,6 +101,19 @@ signals:
     void headClicked();
     void bodyClicked();
 
+public:
+    // ── TTS 嘴型同步 ──
+    /// 当前是否正在播放 TTS 音频
+    bool isSpeaking() const { return m_isSpeaking; }
+
+public slots:
+    /// TTS 开始播放 → 启用嘴型动画
+    void onSpeakingStarted();
+    /// TTS 自然结束 → 停用嘴型
+    void onSpeakingFinished();
+    /// TTS 被中断 → 停用嘴型
+    void onSpeakingInterrupted();
+
 protected:
     void initializeGL() override;
     void resizeGL(int w, int h) override;
@@ -191,4 +204,7 @@ private:
     QString m_lastAnchorSource;
     // ★ 模型刚加载/切换标志 — 下次 computeAndCacheHeadAnchor 后写一次摘要日志
     bool m_needsAnchorLog = false;
+
+    // ── TTS 嘴型同步状态 ──
+    bool m_isSpeaking = false;
 };

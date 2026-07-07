@@ -11,6 +11,7 @@
 #include "LAppTextureManager.hpp"
 #include "LAppModel_Common.hpp"
 #include "PetAnimationState.h"
+#include "LipSyncEnvelope.h"
 
 /**
  * @brief ModelController — CubismUserModelExtend 的增强版。
@@ -48,6 +49,14 @@ public:
 
     /// 设置当前情绪状态 → 驱动表情参数
     void setEmotion(PetAnimationState emotion);
+
+    // ── 嘴型同步（LipSync） ──
+    /// 设置说话状态（由 TTS 播放状态驱动）
+    void setSpeaking(bool speaking);
+    /// 当前是否在说话
+    bool isSpeaking() const { return m_isSpeaking; }
+    /// LipSync 功能是否可用（模型有 LipSync 参数）
+    bool isLipSyncSupported() const { return m_lipSyncSupported; }
 
     /// 设置眼球目标位置（归一化 -1 ~ 1，相对于窗口）
     void setEyeTarget(float x, float y);
@@ -156,6 +165,9 @@ private:
     /// 覆写参数：在 ModelParamUpdate() 之后、Draw() 之前调用
     void applyOverrideParameters();
 
+    /// 从 model3.json 读取 LipSync 参数组（使用 SDK GetLipSyncParameterCount/Id）
+    void loadLipSyncGroup();
+
     /// 获取某个情绪对应的目标参数值表
     void getEmotionTargets(PetAnimationState emotion,
                            float& outMouthOpen, float& outCheek,
@@ -262,6 +274,18 @@ private:
     float m_lastIdleRestartTime = 0.0f;     // 上次启动 Idle 的时间点（_userTimeSeconds）
     bool  m_inProactiveIdleLoop = false;    // true=正在 Idle 循环中，false=被 Tap 等打断
 
+    // ====================================================================
+    // 🗣️ 嘴型同步（LipSync）相关
+    // ====================================================================
+
+    /// LipSync 参数 ID 列表（从 SDK GetLipSyncParameterId 读取）
+    Csm::csmVector<Csm::CubismIdHandle> m_lipSyncIds;
+    /// LipSync 功能是否可用（非空参数组）
+    bool m_lipSyncSupported = false;
+    /// 当前说话状态（由 TTS 驱动）
+    bool m_isSpeaking = false;
+    /// LipSync 包络算法实例
+    LipSyncEnvelope m_lipSyncEnvelope;
 public:
     // ====================================================================
     // 🎯 命中检测区域 — model3.json HitAreas / drawable 名称匹配

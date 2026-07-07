@@ -1011,6 +1011,16 @@ void App::setupConnections()
                 m_settingsWindow->setEdgeTestStatusText(QStringLiteral("就绪"));
             });
 
+    // ── TTS 嘴型同步: 转发说话状态到 PetWindow ──
+    if (m_petWindow) {
+        connect(m_ttsEngine.get(), &TtsEngine::speakingStarted,
+                m_petWindow.get(), &PetWindow::onSpeakingStarted);
+        connect(m_ttsEngine.get(), &TtsEngine::speakingFinished,
+                m_petWindow.get(), &PetWindow::onSpeakingFinished);
+        connect(m_ttsEngine.get(), &TtsEngine::speakingInterrupted,
+                m_petWindow.get(), &PetWindow::onSpeakingInterrupted);
+    }
+
     // ★ TtsEngine 播放完毕 → 检查就寝提醒 pending（TTS 空闲后触发）
     // 管理连接，防止 setupConnections() 被多次调用时产生重复回调
     if (m_bedtimePlaybackConnection) {

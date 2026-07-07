@@ -488,6 +488,14 @@ void Live2DView::loadPendingModelIfNeeded()
     m_needsAnchorLog = true;
     m_lastAnchorSource.clear();
 
+    // ★ 切换模型后恢复 TTS 说话状态
+    //    新 ModelController 的 loadLipSyncGroup() 已在 SetupModel 中调用，
+    //    需要重新传递当前的 m_isSpeaking
+    if (m_isSpeaking && m_model && m_model->isLipSyncSupported()) {
+        m_model->setSpeaking(true);
+        qInfo() << "[LipSync] 模型切换后继承说话状态";
+    }
+
     // ★ 等 idle 动画启动后重新读取包围盒（500ms 足够 idle 开始播放）
     //    初始姿态（T-pose）的包围盒偏大，idle 动画播放后更接近实际视觉大小。
     //    切换角色时也会重新触发此延迟，每个角色都用自己的稳定包围盒。
@@ -1428,6 +1436,34 @@ void Live2DView::getVisibleDrawableRects(QVector<QRect> &outRects) const
         if (dr.width() > 0 && dr.height() > 0) {
             outRects.append(dr);
         }
+    }
+}
+
+// ============================================================================
+// 🗣️ TTS 嘴型同步 — 转发说话状态到 ModelController
+// ============================================================================
+
+void Live2DView::onSpeakingStarted()
+{
+    m_isSpeaking = true;
+    if (m_model) {
+        m_model->setSpeaking(true);
+    }
+}
+
+void Live2DView::onSpeakingFinished()
+{
+    m_isSpeaking = false;
+    if (m_model) {
+        m_model->setSpeaking(false);
+    }
+}
+
+void Live2DView::onSpeakingInterrupted()
+{
+    m_isSpeaking = false;
+    if (m_model) {
+        m_model->setSpeaking(false);
     }
 }
 
