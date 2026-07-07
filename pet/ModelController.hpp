@@ -117,6 +117,29 @@ public:
     /// 直接播放指定动作组/索引的动作（公开封装 StartMotion）
     Csm::CubismMotionQueueEntryHandle startMotionByGroup(const Csm::csmChar* group, Csm::csmInt32 no, Csm::csmInt32 priority);
 
+    // ====================================================================
+    // 😊 预制表情 API（*.exp3.json 表情播放）
+    // ====================================================================
+
+    /// 是否有成功加载的预制表情
+    bool hasExpressions() const;
+
+    /// 成功加载的预制表情数量
+    int expressionCount() const;
+
+    /// 所有成功加载的表情名称列表（QStringList 便于 QML/UI 使用）
+    QStringList expressionNames() const;
+
+    /// 按索引播放预制表情。越界返回 false。
+    bool startExpressionByIndex(int index);
+
+    /// 按名称播放预制表情。名称不存在返回 false。
+    bool startExpressionByName(const QString& name);
+
+    /// 随机播放一个已注册预制表情。无表情返回 false。
+    /// 多于 1 个时尽量避免连续两次相同表情。
+    bool startRandomExpression();
+
 private:
     std::string MakeAssetPath(const std::string& assetFileName);
     void SetAssetDirectory(const std::string& path);
@@ -220,6 +243,19 @@ private:
 
     // 自动注册的点击动作数量（来自未在 model3.json 中引用的 .motion3.json 文件）
     int m_autoTapMotionCount = 0;
+
+    // ====================================================================
+    // 😊 预制表情相关
+    // ====================================================================
+
+    /// 成功加载的预制表情名称列表（与 _expressions 映射同步）
+    QStringList m_expressionNames;
+
+    /// 上次播放的表情索引，-1 表示从未播放。用于避免连续重复。
+    int m_lastExpressionIndex = -1;
+
+    /// 从 _expressions 映射重建 m_expressionNames（排除加载失败的空指针条目）
+    void rebuildExpressionList();
 
     // Idle 循环控制：主动交叉淡入淡出替代 SDK 时间回绕
     float m_idleDuration = 0.0f;            // Idle 动画总时长（秒），取自 motion3.json

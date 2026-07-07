@@ -466,6 +466,22 @@ void Live2DView::loadPendingModelIfNeeded()
     emit modelLoaded(static_cast<double>(canvasW), static_cast<double>(canvasH),
                      tightW, tightH);
 
+    // ★ 能力日志：输出模型的预制表情和点击区域概况
+    if (m_model) {
+        QVector<ModelController::HitAreaAABB> headAreas, bodyAreas;
+        m_model->getInteractionAreas(headAreas, bodyAreas);
+        const QString header = QStringLiteral("\n  ╔══════════════════════════════════╗\n"
+                                              "  ║  Model Capability Report        ║\n"
+                                              "  ╚══════════════════════════════════╝");
+        qInfo().noquote() << header;
+        qInfo().noquote() << QStringLiteral("  Model: %1").arg(modelJsonBaseName);
+        qInfo().noquote() << QStringLiteral("  Expressions loaded: %1").arg(m_model->expressionCount());
+        qInfo().noquote() << QStringLiteral("  Head HitAreas: %1").arg(headAreas.size());
+        qInfo().noquote() << QStringLiteral("  Body HitAreas: %1").arg(bodyAreas.size());
+        qInfo().noquote() << QStringLiteral("  Head expression click enabled: %1")
+                             .arg(m_model->hasExpressions() ? QStringLiteral("yes") : QStringLiteral("no"));
+    }
+
     setStatusMessage(QString()); // 成功 → 清空状态信息，不再显示覆盖层
 
     // 置标志：下次 computeAndCacheHeadAnchor 后写一次锚点摘要日志
@@ -898,6 +914,14 @@ void Live2DView::playTapMotion()
     if (m_model) {
         const auto handle = m_model->startRandomTapMotion();
     }
+}
+
+bool Live2DView::playRandomExpression()
+{
+    if (m_model) {
+        return m_model->startRandomExpression();
+    }
+    return false;
 }
 
 void Live2DView::playMotionGroup(const QString &group, int no)

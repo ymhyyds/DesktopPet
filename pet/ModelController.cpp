@@ -152,6 +152,9 @@ void ModelController::SetupModel(csmUint32 width, csmUint32 height)
         _updateScheduler.AddUpdatableList(expression);
     }
 
+    // ★ 重建表情名称列表（排除加载失败的空指针）
+    rebuildExpressionList();
+
     // Pose
     LoadAsset(_modelJson->GetPoseFileName(),
         [=](Csm::csmByte* buffer, Csm::csmSizeInt bufferSize) {
@@ -708,6 +711,110 @@ Csm::CubismMotionQueueEntryHandle ModelController::startMotionByGroup(const Csm:
     return StartMotion(group, no, priority);
 }
 
+// ====================================================================
+// 😊 预制表情 API
+// ====================================================================
+
+void ModelController::rebuildExpressionList()
+{
+    m_expressionNames.clear();
+    for (auto it = _expressions.Begin(); it != _expressions.End(); ++it)
+    {
+        if (it->Second != nullptr)
+        {
+            m_expressionNames.append(QString::fromUtf8(it->First.GetRawString()));
+        }
+    }
+    m_lastExpressionIndex = -1;
+
+    qInfo().noquote() << QStringLiteral("[ModelController] Expressions loaded: %1")
+                         .arg(m_expressionNames.size());
+    for (const QString &name : m_expressionNames)
+    {
+        qInfo().noquote() << QStringLiteral("  - %1").arg(name);
+    }
+}
+
+bool ModelController::hasExpressions() const
+{
+    return !m_expressionNames.isEmpty();
+}
+
+int ModelController::expressionCount() const
+{
+    return m_expressionNames.size();
+}
+
+QStringList ModelController::expressionNames() const
+{
+    return m_expressionNames;
+}
+
+bool ModelController::startExpressionByIndex(int index)
+{
+    if (!_expressionManager)
+    {
+        LAppPal::PrintMessage("[ModelController] _expressionManager 为空，无法播放表情\n");
+        return false;
+    }
+
+    if (index < 0 || index >= m_expressionNames.size())
+    {
+        LAppPal::PrintMessage("[ModelController] 表情索引越界\n");
+        return false;
+    }
+
+    const std::string key = m_expressionNames[index].toStdString();
+    ACubismMotion* motion = _expressions[key.c_str()];
+    if (motion == nullptr)
+    {
+        LAppPal::PrintMessage("[ModelController] 表情对象为空，无法播放\n");
+        return false;
+    }
+
+    _expressionManager->StartMotion(motion, false);
+
+    LAppPal::PrintMessage(("[ModelController] 播放预制表情: "
+                           + key + "\n").c_str());
+    return true;
+}
+
+bool ModelController::startExpressionByName(const QString &name)
+{
+    const int idx = m_expressionNames.indexOf(name);
+    if (idx < 0)
+    {
+        LAppPal::PrintMessage("[ModelController] 表情名称不存在，跳过\n");
+        return false;
+    }
+    return startExpressionByIndex(idx);
+}
+
+bool ModelController::startRandomExpression()
+{
+    const int count = m_expressionNames.size();
+    if (count == 0)
+    {
+        LAppPal::PrintMessage("[ModelController] 无可用预制表情，跳过随机播放\n");
+        return false;
+    }
+
+    int pick;
+    if (count == 1)
+    {
+        pick = 0;
+    }
+    else
+    {
+        do {
+            pick = QRandomGenerator::global()->bounded(count);
+        } while (pick == m_lastExpressionIndex);
+    }
+
+    m_lastExpressionIndex = pick;
+    return startExpressionByIndex(pick);
+}
+
 void ModelController::ReleaseModelSetting()
 {
     for (auto iter = _motions.Begin(); iter != _motions.End(); ++iter)
@@ -721,6 +828,8 @@ void ModelController::ReleaseModelSetting()
         Csm::ACubismMotion::Delete(iter->Second);
     }
     _expressions.Clear();
+    m_expressionNames.clear();
+    m_lastExpressionIndex = -1;
 
     delete _modelJson;
 

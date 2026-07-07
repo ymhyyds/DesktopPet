@@ -35,6 +35,9 @@ public:
 
     void playTapMotion();
 
+    /// 随机播放一个预制表情（*.exp3.json），无表情时安全返回 false
+    bool playRandomExpression();
+
     void playMotionGroup(const QString &group, int no);
 
     int parameterCount() const;

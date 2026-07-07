@@ -242,6 +242,11 @@ void PetWindow::triggerPet()
 
     showFloatingText(floatText, floatColor);
     saveState();
+
+    // 🎭 头部点击时随机播放一个预制表情（如果有）
+    if (m_live2DView) {
+        m_live2DView->playRandomExpression();
+    }
 }
 
 void PetWindow::setKeepOnTop(bool keepOnTop)
