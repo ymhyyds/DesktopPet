@@ -240,8 +240,6 @@ void InputProxyWindow::performInputMaskUpdate(const QString &reason)
     }
 
     // ── 构建精确 candidate region（PetWindow-local 坐标） ──
-    // buildPreciseInputRegion 使用 Live2DView 的宽高（= PetWindow client rect）
-    // 得到的是 PetWindow-local 坐标系的 region
     const QRegion candidatePrecise = m_live2DView->buildPreciseInputRegion(m_inputMaskCellSize);
 
     // ── 坐标转换：PetWindow-local → Proxy-local ──
@@ -250,8 +248,6 @@ void InputProxyWindow::performInputMaskUpdate(const QString &reason)
     const QRegion candidate = DeriveProxyMask(candidatePrecise, petGeo, actualProxyGeo);
 
     const QSize currentProxySize = actualProxyGeo.size();
-    const QString modelName = m_live2DView->modelName();
-    const int cellSize = m_inputMaskCellSize;
 
     // ── 信任检查 → 发布或保留 ──
 
@@ -274,17 +270,19 @@ void InputProxyWindow::publishInputRegion(const QRegion &region, const QString &
     if (region.isEmpty())
         return;
 
-    const QRect bb = region.boundingRect();
     const QSize currentSize = geometry().size();
-    const QString modelName = m_live2DView ? m_live2DView->modelName() : QString();
 
     // ── 防重复 ──
     if (m_preciseRegionValid && m_preciseRegion == region) {
-        // region 没变，但确保 last good 已记录
         if (!m_hasLastGoodInputRegion) {
             m_lastGoodInputRegion = region;
             m_hasLastGoodInputRegion = true;
             m_lastGoodProxySize = currentSize;
+            update();
+        } else if (m_lastGoodProxySize != currentSize) {
+            // region 相同但 widget size 变化 → 刷新 alpha backing store
+            m_lastGoodProxySize = currentSize;
+            update();
         }
         return;
     }
@@ -310,6 +308,9 @@ void InputProxyWindow::publishInputRegion(const QRegion &region, const QString &
     m_lastGoodInputRegion = region;
     m_hasLastGoodInputRegion = true;
     m_lastGoodProxySize = currentSize;
+
+    // ── 请求重绘以刷新 alpha backing store ──
+    update();
 }
 
 // ============================================================================
@@ -560,17 +561,19 @@ void InputProxyWindow::resizeEvent(QResizeEvent *event)
 // 绘制：仅在多矩形 preciseRegion 内绘制 alpha=1 输入表面
 // ============================================================================
 
-void InputProxyWindow::paintEvent(QPaintEvent * /*event*/)
+void InputProxyWindow::paintEvent(QPaintEvent *event)
 {
+    Q_UNUSED(event);
+
     QPainter painter(this);
     painter.setCompositionMode(QPainter::CompositionMode_Source);
 
-    // 整窗填充 alpha=0（确保透明）
+    // 清除旧尺寸、旧 region 遗留的非零 alpha。
     painter.fillRect(rect(), QColor(0, 0, 0, 0));
 
-    // 在 preciseRegion 内绘制 alpha=1 输入表面（视觉不可见，确保 WS_EX_LAYERED 接收鼠标事件）
-    if (m_preciseRegionValid) {
+    // 只允许 precise region 内 alpha 非零
+    if (m_preciseRegionValid && !m_preciseRegion.isEmpty()) {
         painter.setClipRegion(m_preciseRegion);
-        painter.fillRect(m_preciseRegion.boundingRect(), QColor(0, 0, 0, 1));
+        painter.fillRect(rect(), QColor(0, 0, 0, 1));
     }
 }
