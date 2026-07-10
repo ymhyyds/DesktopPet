@@ -33,6 +33,22 @@ public:
      */
     void setPersonality(const QString &personality, const QString &characterName);
 
+    /// 返回默认的 AI 说话风格（空字符串 = 无自定义风格，保持默认行为）。
+    static QString defaultAiStylePrompt();
+
+    /// 获取当前用户自定义的说话风格提示词。
+    QString aiStylePrompt() const { return m_stylePrompt; }
+
+    /// 设置用户自定义的说话风格提示词。会在下一次 contextHistory() 调用时生效。
+    /// 空白内容会被视为"无自定义风格"，自动回退到默认行为。
+    void setAiStylePrompt(const QString &prompt) { m_stylePrompt = prompt.trimmed(); }
+
+    /// 返回实际生效的说话风格提示词：非空时返回 m_stylePrompt，否则返回 defaultAiStylePrompt()。
+    QString effectiveAiStylePrompt() const
+    {
+        return m_stylePrompt.isEmpty() ? defaultAiStylePrompt() : m_stylePrompt;
+    }
+
     /// 把用户消息加入历史（同时做长度裁剪）。
     void appendUserMessage(const QString &content);
 
@@ -74,6 +90,7 @@ private:
 
 private:
     QString m_systemPrompt;
+    QString m_stylePrompt;        // 用户自定义说话风格（空 = 无自定义，保持默认行为），最大 2000 字
     QList<ChatMessage> m_history; // 不包含 system 消息，role 只会是 "user"/"assistant"
     int m_maxHistoryTurns = 10;   // 默认保留最近 10 轮，平衡上下文连贯性和请求体大小
     bool m_timeAwareness = true;
