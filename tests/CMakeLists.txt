@@ -84,6 +84,21 @@ add_custom_command(TARGET test_tts POST_BUILD
         "$<TARGET_FILE_DIR:test_tts>/MockWeatherServer.py"
 )
 
+# Deploy Qt6Multimedia runtime DLL so test_tts can load it
+# without relying on PATH or manual copy.
+if(WIN32)
+    add_custom_command(TARGET test_tts POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Multimedia>"
+            "$<TARGET_FILE_DIR:test_tts>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Widgets>"
+            "$<TARGET_FILE_DIR:test_tts>"
+        COMMENT "Deploying Qt6Multimedia and Qt6Widgets runtimes for test_tts"
+        VERBATIM
+    )
+endif()
+
 add_test(NAME test_tts
     COMMAND test_tts
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
