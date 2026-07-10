@@ -3,6 +3,10 @@
 #include <QWidget>
 #include <QPoint>
 #include <QRegion>
+#include <QSize>
+#include <QString>
+#include <QTimer>
+#include <QVector>
 
 class PetWindow;
 class Live2DView;
@@ -12,7 +16,7 @@ class QHideEvent;
  * @brief InputProxyWindow 是桌宠的透明输入代理窗口。
  *
  * 职责：
- *  - 使用多矩形 QRegion mask（基于每个可见 Drawable 的 AABB + 4px padding）
+ *  - 使用精确 point-in-triangle grid detection（基于每个可见 Drawable 的顶点/索引数据）
  *  - mask 内 → 接收鼠标事件，转交 InteractionManager + 命中检测
  *  - mask 外 → 系统级穿透到桌面
  *  - 不绘制任何内容，不抢焦点，不激活
@@ -20,6 +24,15 @@ class QHideEvent;
  *
  * PetWindow 不再使用 setMask/SetWindowRgn，仅负责 Live2D 渲染。
  * 两者分离后，mask 不再裁剪 OpenGL 输出，消除闪烁和渲染裁剪。
+ *
+ * 关键设计：
+ *  - last-good-mask 事务发布：新 mask 成功才替换旧 mask
+ *  - empty / suspicious mask 永远不会覆盖 last good
+ *  - model switch 不清空 OS mask
+ *  - 不做复杂状态机
+ *  - cell size = 2 logical px
+ *  - 无 AABB fallback
+ *  - 无 alpha/PBO/HTTRANSPARENT/低层钩子
  */
 class InputProxyWindow : public QWidget
 {
@@ -33,8 +46,12 @@ public:
     /// 同步 geometry 到 PetWindow（始终跟随完整 PetWindow，不裁剪）
     void syncGeometry();
 
-    /// 更新输入 mask（基于每个可见 Drawable 的 AABB + 4px padding）
+    /// 更新输入 mask（立即执行，基于精确 point-in-triangle grid detection）
     void updateInputMask();
+
+    /// 请求延迟更新输入 mask（防抖，合并短时间内的多次请求）
+    void requestInputMaskUpdate(const QString &reason, int delayMs);
+
 
 signals:
     void dragFinished();
@@ -59,6 +76,17 @@ private:
     void handleDragMove(QMouseEvent *event);
     void cleanupDrag();
 
+    // ── Input Mask v2: last-good-mask 事务发布 ──
+
+    /// 实际执行 input mask 更新（由定时器或直接调用触发）
+    void performInputMaskUpdate(const QString &reason);
+
+    /// 将候选 region 发布为 OS mask，更新 last good 缓存
+    void publishInputRegion(const QRegion &region, const QString &reason);
+
+    /// 确保 m_inputMaskTimer 存在
+    bool ensureInputMaskTimer();
+
 private:
     PetWindow   *m_petWindow   = nullptr;
     Live2DView  *m_live2DView  = nullptr;
@@ -74,7 +102,7 @@ private:
     /// 按下时的全局鼠标位置（用于拖动阈值判断）
     QPoint m_pressGlobalStartPos;
 
-    // ── 精确 mask（逐 Drawable AABB + 4px padding，proxy-local） ──
+    // ── 当前 OS mask 缓存（用于 isInteractivePetPoint 命中检测） ──
     QRegion m_preciseRegion;
     bool    m_preciseRegionValid = false;
 
@@ -84,7 +112,25 @@ private:
     // ── syncGeometry 重入保护 ──
     bool m_syncingGeometry = false;
 
-    static constexpr int kMaskPaddingPx = 4;
+    // ══════════════════════════════════════════════════════════════════
+    // Input Mask v2 — last-good-mask 事务发布
+    // ══════════════════════════════════════════════════════════════════
+
+    /// 上次成功发布的 OS mask（发布新 mask 前不覆盖）
+    QRegion m_lastGoodInputRegion;
+    /// 是否有 published 过的 last good mask
+    bool    m_hasLastGoodInputRegion = false;
+    /// 上次成功发布时的 proxy 尺寸（用于信任检查）
+    QSize   m_lastGoodProxySize;
+
+    /// grid cell 边长（逻辑像素）
+    int     m_inputMaskCellSize = 2;
+
+    /// 是否有 pending 的延迟更新请求
+    bool    m_inputMaskUpdatePending = false;
+    /// 延迟调度定时器
+    QTimer *m_inputMaskTimer = nullptr;
+
     static constexpr int kDragThreshold  = 6;
 
     // ── 诊断开关（已关闭）：裁剪时使用完整矩形 mask 代替 DeriveProxyMask ──

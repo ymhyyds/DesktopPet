@@ -14,6 +14,7 @@
 
 #include "PetWindow.h"
 #include "../interaction/DrawableBounds.h"
+#include "../interaction/InputRegionBuilder.h"
 
 #include <QTimer>
 #include <QDebug>
@@ -28,8 +29,11 @@
 #include <QOpenGLContext>
 #include <QDir>
 #include <QPainter>
+#include <QPointF>
+#include <QRegion>
 #include <QMouseEvent>
 #include <QCursor>
+#include <climits>
 
 namespace {
 void writeDebugLog(const QString &message)
@@ -251,6 +255,17 @@ void Live2DView::loadModel(const QString &modelDirPath)
         doneCurrent();
         update();
     }
+}
+
+QString Live2DView::modelName() const
+{
+    if (m_modelDirectory.isEmpty())
+        return {};
+    QString name = m_modelDirectory;
+    if (name.endsWith(QLatin1Char('/')))
+        name.chop(1);
+    const int idx = name.lastIndexOf(QLatin1Char('/'));
+    return idx >= 0 ? name.mid(idx + 1) : name;
 }
 
 void Live2DView::setModelScale(double scale)
@@ -1438,6 +1453,185 @@ void Live2DView::getVisibleDrawableRects(QVector<QRect> &outRects) const
         }
     }
 }
+
+// ============================================================================
+// 📐 精确输入 Region 构建 — 基于三角形网格的 point-in-triangle 检测
+// ============================================================================
+
+QRegion Live2DView::buildPreciseInputRegion(int cellSizePx) const
+{
+    if (!m_model || !m_model->GetModel()) {
+        return QRegion();
+    }
+    if (width() <= 0 || height() <= 0) {
+        return QRegion();
+    }
+    if (m_canvasWidth <= 0.0 || m_canvasHeight <= 0.0) {
+        return QRegion();
+    }
+
+    // ── 投影参数（与 getVisibleDrawableRects 一致） ──
+    constexpr float marginRatio = static_cast<float>(PetWindow::kAnimMarginRatio);
+    constexpr float enlargeFactor = 1.0f + marginRatio * 2.0f;
+    constexpr float comp = 1.0f / enlargeFactor;
+
+    const float canvasW_px = static_cast<float>(width()) * comp;
+    const float canvasX0 = (static_cast<float>(width()) - canvasW_px) * 0.5f;
+    const float canvasAspect = static_cast<float>(m_canvasHeight / m_canvasWidth);
+    const float canvasH_px = canvasW_px * canvasAspect;
+    const float canvasY0 = (static_cast<float>(height()) - canvasH_px) * 0.5f;
+    const float halfW = static_cast<float>(m_canvasWidth) * 0.5f;
+    const float halfH = static_cast<float>(m_canvasHeight) * 0.5f;
+
+    auto *model = m_model->GetModel();
+    const int drawableCount = model->GetDrawableCount();
+
+    // 收集命中的 grid cell
+    QVector<QPair<int,int>> hitCells;
+
+    for (int d = 0; d < drawableCount; ++d) {
+        // 跳过不可见 Drawable
+        if (!model->GetDrawableDynamicFlagIsVisible(d))
+            continue;
+        // 跳过完全透明的 Drawable
+        if (model->GetDrawableOpacity(d) < 0.01f)
+            continue;
+
+        const auto *verts = model->GetDrawableVertexPositions(d);
+        const int vc = model->GetDrawableVertexCount(d);
+        if (vc < 3)
+            continue;
+
+        const auto *indices = model->GetDrawableVertexIndices(d);
+        const int ic = model->GetDrawableVertexIndexCount(d);
+        const int triCount = (ic > 0) ? (ic / 3) : (vc / 3);
+        if (triCount < 1)
+            continue;
+
+        // ── 投影全部顶点到像素坐标 ──
+        // 使用栈分配的小缓冲区（常见 Live2D drawable 顶点数 < 512）
+        // 避免通用 QVector 分配开销
+        constexpr int kStackVerts = 256;
+        QPointF stackBuf[kStackVerts];
+        QVector<QPointF> heapBuf;
+        QPointF *pixelVerts = stackBuf;
+
+        if (vc > kStackVerts) {
+            heapBuf.resize(vc);
+            pixelVerts = heapBuf.data();
+        }
+
+        for (int v = 0; v < vc; ++v) {
+            const float tX = (verts[v].X + halfW) / static_cast<float>(m_canvasWidth);
+            const float tY = (verts[v].Y + halfH) / static_cast<float>(m_canvasHeight);
+            pixelVerts[v] = QPointF(
+                canvasX0 + tX * canvasW_px,
+                canvasY0 + (1.0f - tY) * canvasH_px
+            );
+        }
+
+        // ── 遍历每个三角形 ──
+        for (int t = 0; t < triCount; ++t) {
+            int i0, i1, i2;
+            if (ic > 0) {
+                i0 = indices[t * 3 + 0];
+                i1 = indices[t * 3 + 1];
+                i2 = indices[t * 3 + 2];
+            } else {
+                i0 = t * 3 + 0;
+                i1 = t * 3 + 1;
+                i2 = t * 3 + 2;
+            }
+
+            if (i0 >= vc || i1 >= vc || i2 >= vc)
+                continue;
+
+            const QPointF &p0 = pixelVerts[i0];
+            const QPointF &p1 = pixelVerts[i1];
+            const QPointF &p2 = pixelVerts[i2];
+
+            // ── Broad phase：三角形 AABB（像素空间） ──
+            float tMinX = std::min({p0.x(), p1.x(), p2.x()});
+            float tMinY = std::min({p0.y(), p1.y(), p2.y()});
+            float tMaxX = std::max({p0.x(), p1.x(), p2.x()});
+            float tMaxY = std::max({p0.y(), p1.y(), p2.y()});
+
+            // 钳制到窗口边界（像素空间）
+            tMinX = std::max(0.0f, tMinX);
+            tMinY = std::max(0.0f, tMinY);
+            tMaxX = std::min(static_cast<float>(width() - 1), tMaxX);
+            tMaxY = std::min(static_cast<float>(height() - 1), tMaxY);
+
+            if (tMaxX <= tMinX || tMaxY <= tMinY)
+                continue;
+
+            // 退化三角形（像素空间面积接近零）
+            const float area = std::abs(
+                (p1.x() - p0.x()) * (p2.y() - p0.y()) -
+                (p2.x() - p0.x()) * (p1.y() - p0.y()));
+            if (area < 0.5f)
+                continue;
+
+            // ── 在三角形 AABB 内遍历 grid cell ──
+            const int colStart = static_cast<int>(tMinX) / cellSizePx;
+            const int colEnd = (static_cast<int>(tMaxX) + cellSizePx - 1) / cellSizePx;
+            const int rowStart = static_cast<int>(tMinY) / cellSizePx;
+            const int rowEnd = (static_cast<int>(tMaxY) + cellSizePx - 1) / cellSizePx;
+
+            for (int r = rowStart; r < rowEnd; ++r) {
+                const float cy = static_cast<float>(r * cellSizePx + cellSizePx / 2);
+                // 基于 AABB 的快速提前剔除
+                if (cy < tMinY || cy > tMaxY)
+                    continue;
+
+                for (int c = colStart; c < colEnd; ++c) {
+                    const float cx = static_cast<float>(c * cellSizePx + cellSizePx / 2);
+
+                    if (cx < tMinX || cx > tMaxX)
+                        continue;
+
+                    // ── Point-in-triangle 精确检测：先测中心点 ──
+                    bool cellHit = InputRegionBuilder::pointInTriangle(
+                        cx, cy,
+                        p0.x(), p0.y(),
+                        p1.x(), p1.y(),
+                        p2.x(), p2.y());
+
+                    // ── 中心未命中 → 测试 cell 四个角点 ──
+                    // 当三角形窄于 cellSizePx 时，cell 中心可能在三角形外，
+                    // 但角点落在三角形内。测试四个角点确保薄三角形不被漏检。
+                    if (!cellHit) {
+                        const float x0 = static_cast<float>(c * cellSizePx);
+                        const float y0 = static_cast<float>(r * cellSizePx);
+                        const float x1 = static_cast<float>((c + 1) * cellSizePx);
+                        const float y1 = static_cast<float>((r + 1) * cellSizePx);
+
+                        cellHit =
+                            InputRegionBuilder::pointInTriangle(
+                                x0, y0, p0.x(), p0.y(), p1.x(), p1.y(), p2.x(), p2.y()) ||
+                            InputRegionBuilder::pointInTriangle(
+                                x1, y0, p0.x(), p0.y(), p1.x(), p1.y(), p2.x(), p2.y()) ||
+                            InputRegionBuilder::pointInTriangle(
+                                x0, y1, p0.x(), p0.y(), p1.x(), p1.y(), p2.x(), p2.y()) ||
+                            InputRegionBuilder::pointInTriangle(
+                                x1, y1, p0.x(), p0.y(), p1.x(), p1.y(), p2.x(), p2.y());
+                    }
+
+                    if (cellHit) {
+                        hitCells.append(qMakePair(c, r));
+                    }
+                }
+            }
+        }
+
+    }
+
+    if (hitCells.isEmpty())
+        return QRegion();
+
+    return InputRegionBuilder::mergeCellRects(hitCells, cellSizePx, width(), height());
+}
+
 
 // ============================================================================
 // 🗣️ TTS 嘴型同步 — 转发说话状态到 ModelController

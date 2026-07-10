@@ -1,4 +1,5 @@
 #include "InputProxyWindow.h"
+#include "InputRegionBuilder.h"
 
 #include "../pet/PetWindow.h"
 #include "../pet/Live2DView.h"
@@ -45,6 +46,9 @@ InputProxyWindow::InputProxyWindow(PetWindow *petWindow, Live2DView *live2DView,
     if (m_petWindow)
         m_petWindow->installEventFilter(this);
 
+    // ★ 创建 mask 更新定时器
+    ensureInputMaskTimer();
+
     // 初始 mask
     updateInputMask();
 }
@@ -52,6 +56,8 @@ InputProxyWindow::InputProxyWindow(PetWindow *petWindow, Live2DView *live2DView,
 InputProxyWindow::~InputProxyWindow()
 {
     cleanupDrag();
+    delete m_inputMaskTimer;
+    m_inputMaskTimer = nullptr;
 }
 
 // ============================================================================
@@ -112,7 +118,9 @@ bool InputProxyWindow::eventFilter(QObject *watched, QEvent *event)
     //  只有 preciseRegion.contains + hitTestAt + alphaTestAt 全部通过才放行。
     //  return true 只阻止 Qt 事件循环内继续派发（不涉及跨进程穿透），
     //  跨进程穿透已由 OS 级 setMask(preciseRegion) 处理。
-    //  MASK_FALSE_POSITIVE：点在 preciseRegion 内但 hitTest 未命中，
+    //  REGION_INCONSISTENT：点在 preciseRegion 外——仅表示事件路由/缓存不一致，
+    //  不是 OS mask 穿透（因为 InputProxyWindow 收到事件即表示 OS mask 已放行）。
+    //  HITTEST_MISS：点在 preciseRegion 内但 hitTest 未命中，
     //  说明该坐标在 Drawable AABB 的透明间隙内。
     switch (event->type()) {
     case QEvent::MouseButtonPress:
@@ -132,16 +140,6 @@ bool InputProxyWindow::eventFilter(QObject *watched, QEvent *event)
         const QPoint petLocal = m_petWindow->mapFromGlobal(globalPos);
         if (!isInteractivePetPoint(petLocal)) {
             // 未命中交互点 → 清理 pending 状态并阻止事件派发
-#ifndef QT_NO_DEBUG
-            const bool isRelease = (event->type() == QEvent::MouseButtonRelease);
-            qDebug() << "[InputProxy::eventFilter] 非交互点击被拦截"
-                     << "type=" << event->type()
-                     << "globalPos=" << globalPos
-                     << "petLocal=" << petLocal
-                     << "m_dragging=" << m_dragging
-                     << (isRelease ? "[RELEASE swallowed — cleanupDrag in filter]" : "")
-                     << "grabber=" << QWidget::mouseGrabber();
-#endif
             cleanupDrag();
             return true;
         }
@@ -199,83 +197,119 @@ void InputProxyWindow::syncGeometry()
 
     // ── geometry 变化 → 刷新 mask ──
     if (oldSize != size()) {
-        updateInputMask();
+        requestInputMaskUpdate(QStringLiteral("resize"), 0);
     }
 }
 
 // ============================================================================
-// Mask 更新 — 使用逐 Drawable AABB + 4px padding 构建多矩形 QRegion
+// Input Mask v2 — last-good-mask 事务发布
 // ============================================================================
 
+bool InputProxyWindow::ensureInputMaskTimer()
+{
+    if (m_inputMaskTimer)
+        return true;
+    m_inputMaskTimer = new QTimer(this);
+    m_inputMaskTimer->setSingleShot(true);
+    connect(m_inputMaskTimer, &QTimer::timeout, this, [this]() {
+        m_inputMaskUpdatePending = false;
+        performInputMaskUpdate(QStringLiteral("timer"));
+    });
+    return true;
+}
+
+void InputProxyWindow::requestInputMaskUpdate(const QString &reason, int delayMs)
+{
+    if (!ensureInputMaskTimer())
+        return;
+
+    m_inputMaskUpdatePending = true;
+    m_inputMaskTimer->start(delayMs);
+}
+
 void InputProxyWindow::updateInputMask()
+{
+    // 立即执行更新（无延迟）
+    performInputMaskUpdate(QStringLiteral("direct"));
+}
+
+void InputProxyWindow::performInputMaskUpdate(const QString &reason)
 {
     if (!m_live2DView || !m_petWindow) {
         return;
     }
 
-    // 1. 获取所有可见 Drawable 的紧贴包围盒（PetWindow 本地像素坐标）
-    QVector<QRect> drawableRects;
-    m_live2DView->getVisibleDrawableRects(drawableRects);
+    // ── 构建精确 candidate region（PetWindow-local 坐标） ──
+    // buildPreciseInputRegion 使用 Live2DView 的宽高（= PetWindow client rect）
+    // 得到的是 PetWindow-local 坐标系的 region
+    const QRegion candidatePrecise = m_live2DView->buildPreciseInputRegion(m_inputMaskCellSize);
 
-    if (drawableRects.isEmpty()) {
-        return;
-    }
-
-    // 2. 构建规范 PetWindow-local region（不被裁剪、不被平移）
-    QRegion canonicalPetRegion;
-    for (const QRect &rect : drawableRects) {
-        QRect r = rect.adjusted(-kMaskPaddingPx, -kMaskPaddingPx,
-                                 kMaskPaddingPx, kMaskPaddingPx);
-        canonicalPetRegion |= QRegion(r);
-    }
-
-    // 3. 读取实时 geometry（每次调用重新读取）
+    // ── 坐标转换：PetWindow-local → Proxy-local ──
     const QRect petGeo = m_petWindow->geometry();
     const QRect actualProxyGeo = geometry();
-    const bool isClipped = (petGeo != actualProxyGeo);
+    const QRegion candidate = DeriveProxyMask(candidatePrecise, petGeo, actualProxyGeo);
 
-#ifndef QT_NO_DEBUG
-    if (isClipped) {
-        qDebug() << "[InputProxy::updateInputMask]"
-                 << "isClipped=" << (isClipped ? "YES" : "no")
-                 << "petGeo=" << petGeo
-                 << "proxyGeo=" << actualProxyGeo;
-    }
-#endif
+    const QSize currentProxySize = actualProxyGeo.size();
+    const QString modelName = m_live2DView->modelName();
+    const int cellSize = m_inputMaskCellSize;
 
-    // 4. 从 canonical region 推导 proxy-local mask
-    QRegion proxyMask = DeriveProxyMask(canonicalPetRegion, petGeo, actualProxyGeo);
+    // ── 信任检查 → 发布或保留 ──
 
-    if (proxyMask.isEmpty()) {
+    // 情况 1：empty candidate
+    if (candidate.isEmpty()) {
         return;
     }
 
-    // 5. 全窗口 → 清除 mask
-    if (proxyMask == QRegion(QRect(QPoint(0, 0), actualProxyGeo.size()))) {
-        if (m_preciseRegionValid) {
-            clearMask();
-            m_preciseRegionValid = false;
+    // 情况 2：suspicious candidate（non-empty 但未通过 trust check）
+    if (InputRegionBuilder::isSuspiciousInputRegion(candidate, currentProxySize)) {
+        return;
+    }
+
+    // 情况 3：trusted region → 发布
+    publishInputRegion(candidate, reason);
+}
+
+void InputProxyWindow::publishInputRegion(const QRegion &region, const QString &reason)
+{
+    if (region.isEmpty())
+        return;
+
+    const QRect bb = region.boundingRect();
+    const QSize currentSize = geometry().size();
+    const QString modelName = m_live2DView ? m_live2DView->modelName() : QString();
+
+    // ── 防重复 ──
+    if (m_preciseRegionValid && m_preciseRegion == region) {
+        // region 没变，但确保 last good 已记录
+        if (!m_hasLastGoodInputRegion) {
+            m_lastGoodInputRegion = region;
+            m_hasLastGoodInputRegion = true;
+            m_lastGoodProxySize = currentSize;
         }
         return;
     }
 
-    // 6. 防重复
-    if (m_preciseRegionValid && m_preciseRegion == proxyMask) {
+    // ── 全窗口 → clearMask ──
+    // 理论上精确 grid 不会产生全窗口结果，但保留防御性检查
+    if (region == QRegion(QRect(QPoint(0, 0), currentSize))) {
+        if (m_preciseRegionValid) {
+            clearMask();
+        }
+        m_preciseRegionValid = false;
+        m_preciseRegion = QRegion();
+        // 不覆盖 last good（clearMask 是临时状态）
         return;
     }
 
-    // 7. 应用 mask
-    setMask(proxyMask);
-    m_preciseRegion = proxyMask;
+    // ── 应用 OS mask ──
+    setMask(region);
+    m_preciseRegion = region;
     m_preciseRegionValid = true;
 
-#ifndef QT_NO_DEBUG
-    qDebug() << "[InputProxy] updateInputMask"
-             << "drawableCount=" << drawableRects.size()
-             << "petGeo=" << petGeo
-             << "proxyGeo=" << actualProxyGeo
-             << "maskBB=" << proxyMask.boundingRect();
-#endif
+    // ── 更新 last good ──
+    m_lastGoodInputRegion = region;
+    m_hasLastGoodInputRegion = true;
+    m_lastGoodProxySize = currentSize;
 }
 
 // ============================================================================
@@ -301,11 +335,11 @@ void InputProxyWindow::mousePressEvent(QMouseEvent *event)
         return;
     }
 
-    // Hit-area 细分（头部/身体），使用 PetWindow-local 坐标
+    // ── Hit-area 细分（头部/身体），使用 PetWindow-local 坐标 ──
     const float px = static_cast<float>(petLocal.x());
     const float py = static_cast<float>(petLocal.y());
     bool isHead = false;
-    m_live2DView->hitTestAt(px, py, isHead);
+    bool hitHit = m_live2DView->hitTestAt(px, py, isHead);
     bool alphaOk = m_live2DView->alphaTestAt(px, py);
     m_pressInHeadArea = alphaOk && isHead;
     m_pressInBodyArea = alphaOk && !isHead;
@@ -365,6 +399,8 @@ void InputProxyWindow::mouseReleaseEvent(QMouseEvent *event)
     if (event->button() == Qt::LeftButton && m_dragging) {
         cleanupDrag();
         syncGeometry();
+        // 拖拽释放后请求重新构建 mask（滞后，不阻塞 release）
+        requestInputMaskUpdate(QStringLiteral("drag-release"), 50);
         emit dragFinished();
         return;
     }

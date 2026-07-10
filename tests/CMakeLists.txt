@@ -171,6 +171,35 @@ add_test(NAME test_drawable_bounds
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# ── Input Region Grid Unit Tests ──────────────────────────────────────────
+# Pure-logic tests for InputRegionBuilder helpers: pointInTriangle, mergeCellRects,
+# isTrustedInputRegion, isSuspiciousInputRegion, and publish decision simulation.
+# No Qt Widgets, no Live2D SDK, no OpenGL, no mock server dependencies.
+
+add_executable(test_input_region_grid
+    ${CMAKE_CURRENT_SOURCE_DIR}/InputRegionGridTest.cpp
+)
+
+set_target_properties(test_input_region_grid PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_input_region_grid PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/interaction
+)
+
+target_link_libraries(test_input_region_grid PRIVATE
+    Qt6::Test
+    Qt6::Core
+    Qt6::Gui
+)
+
+add_test(NAME test_input_region_grid
+    COMMAND test_input_region_grid
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
 # ── Expression Selector Unit Tests ──────────────────────────────────────────
 # Pure-logic tests for expression name management and random selection with
 # consecutive-repeat avoidance. No Cubism SDK, no OpenGL, no window deps.
