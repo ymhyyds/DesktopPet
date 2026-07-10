@@ -7,6 +7,7 @@
 #include <QImage>
 #include <QRect>
 #include <QVector>
+#include <QPair>
 
 #include "PetAnimationState.h"
 
@@ -81,6 +82,17 @@ public:
     /// 获取所有可见 Drawable 的紧贴包围盒（窗口局部像素坐标）
     /// 用于构建 setMask 的 QRegion，按单个 Drawable 实际绘制区域裁剪窗口
     void getVisibleDrawableRects(QVector<QRect> &outRects) const;
+
+    /// 构建精确输入 region（基于三角形网格点-三角形包含测试）。
+    /// 使用 point-in-triangle 逐 grid cell 检测，cell 中心命中任意 triangle 则加入 region。
+    /// 不做 AABB 直接加入 region。
+    /// @param cellSizePx  grid cell 边长（逻辑像素），默认 2
+    /// @return 精确的 QRegion，模型未加载 / 无 drawable / 无有效几何时返回空 QRegion
+    QRegion buildPreciseInputRegion(int cellSizePx = 2) const;
+
+
+    /// 返回当前加载的模型目录名（最后一级路径）
+    QString modelName() const;
 
     /// 获取模型头部锚点（窗口局部像素坐标）
     /// 优先级：Head HitArea 顶部中心 → Body HitArea 水平范围 + visible drawable 扫描顶部 → tight bounds 顶部中心

@@ -84,6 +84,21 @@ add_custom_command(TARGET test_tts POST_BUILD
         "$<TARGET_FILE_DIR:test_tts>/MockWeatherServer.py"
 )
 
+# Deploy Qt6Multimedia runtime DLL so test_tts can load it
+# without relying on PATH or manual copy.
+if(WIN32)
+    add_custom_command(TARGET test_tts POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Multimedia>"
+            "$<TARGET_FILE_DIR:test_tts>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Widgets>"
+            "$<TARGET_FILE_DIR:test_tts>"
+        COMMENT "Deploying Qt6Multimedia and Qt6Widgets runtimes for test_tts"
+        VERBATIM
+    )
+endif()
+
 add_test(NAME test_tts
     COMMAND test_tts
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
@@ -168,6 +183,35 @@ target_link_libraries(test_drawable_bounds PRIVATE
 
 add_test(NAME test_drawable_bounds
     COMMAND test_drawable_bounds
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+# ── Input Region Grid Unit Tests ──────────────────────────────────────────
+# Pure-logic tests for InputRegionBuilder helpers: pointInTriangle, mergeCellRects,
+# isTrustedInputRegion, isSuspiciousInputRegion, and publish decision simulation.
+# No Qt Widgets, no Live2D SDK, no OpenGL, no mock server dependencies.
+
+add_executable(test_input_region_grid
+    ${CMAKE_CURRENT_SOURCE_DIR}/InputRegionGridTest.cpp
+)
+
+set_target_properties(test_input_region_grid PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_input_region_grid PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/interaction
+)
+
+target_link_libraries(test_input_region_grid PRIVATE
+    Qt6::Test
+    Qt6::Core
+    Qt6::Gui
+)
+
+add_test(NAME test_input_region_grid
+    COMMAND test_input_region_grid
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 

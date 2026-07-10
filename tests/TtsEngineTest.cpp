@@ -81,10 +81,16 @@ void TtsEngineTest::cleanupTestCase()
 
 void TtsEngineTest::init()
 {
-    s_vvMock.clearError();
-    s_vvMock.setDelay(0);
-    s_vvMock.setResponseType("audio_query", "normal");
-    s_vvMock.setResponseType("synthesis", "normal");
+    QVERIFY2(s_vvMock.clearError(),
+             qPrintable(QStringLiteral("clearError failed: %1").arg(s_vvMock.lastErrorString())));
+    QVERIFY2(s_vvMock.setDelay(0),
+             qPrintable(QStringLiteral("setDelay failed: %1").arg(s_vvMock.lastErrorString())));
+    QVERIFY2(s_vvMock.setResponseType("audio_query", "normal"),
+             qPrintable(QStringLiteral("setResponseType audio_query failed: %1")
+                            .arg(s_vvMock.lastErrorString())));
+    QVERIFY2(s_vvMock.setResponseType("synthesis", "normal"),
+             qPrintable(QStringLiteral("setResponseType synthesis failed: %1")
+                            .arg(s_vvMock.lastErrorString())));
 }
 
 void TtsEngineTest::cleanup()

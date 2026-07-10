@@ -21,28 +21,32 @@ void VoiceVoxClientTest::initTestCase()
         scriptPath = QStringLiteral("MockVoiceVoxServer.py");
     }
     QVERIFY2(s_vvMock.start(scriptPath), "Failed to start mock VoiceVox server");
-
-    s_vvClient = new VoiceVoxClient();
-    s_vvClient->setBaseUrl(s_vvMock.baseUrl());
 }
 
 void VoiceVoxClientTest::cleanupTestCase()
 {
-    delete s_vvClient;
-    s_vvClient = nullptr;
     s_vvMock.stop();
 }
 
 void VoiceVoxClientTest::init()
 {
-    s_vvMock.clearError();
-    s_vvMock.setDelay(0);
+    QVERIFY2(s_vvMock.clearError(),
+             qPrintable(QStringLiteral("clearError failed: %1").arg(s_vvMock.lastErrorString())));
+    QVERIFY2(s_vvMock.setDelay(0),
+             qPrintable(QStringLiteral("setDelay failed: %1").arg(s_vvMock.lastErrorString())));
+    QVERIFY2(s_vvMock.waitUntilReady(),
+             qPrintable(QStringLiteral("waitUntilReady failed: %1").arg(s_vvMock.lastErrorString())));
+
+    s_vvClient = new VoiceVoxClient();
+    s_vvClient->setBaseUrl(s_vvMock.baseUrl());
 }
 
 void VoiceVoxClientTest::cleanup()
 {
     if (s_vvClient) {
         s_vvClient->cancelPendingRequests();
+        delete s_vvClient;
+        s_vvClient = nullptr;
     }
 }
 
@@ -140,6 +144,12 @@ void VoiceVoxClientTest::testCancelPendingRequests()
 
     QCOMPARE(audioSpy.count(), 0);  // no audioReady
     // requestFailed may fire for aborted requests — that's OK
+
+    // Ensure mock server has fully recovered from the aborted connection
+    // before the next test's init() tries to configure it.
+    QVERIFY2(s_vvMock.waitUntilReady(),
+             qPrintable(QStringLiteral("Mock server not ready after cancel: %1")
+                            .arg(s_vvMock.lastErrorString())));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -147,7 +157,9 @@ void VoiceVoxClientTest::testCancelPendingRequests()
 // ═══════════════════════════════════════════════════════════════════════════
 void VoiceVoxClientTest::testAudioQueryError()
 {
-    s_vvMock.setError(500, QStringLiteral("audio_query"));
+    QVERIFY2(s_vvMock.setError(500, QStringLiteral("audio_query")),
+             qPrintable(QStringLiteral("setError(500, audio_query) failed: %1")
+                            .arg(s_vvMock.lastErrorString())));
 
     QSignalSpy audioSpy(s_vvClient, &VoiceVoxClient::audioReady);
     QSignalSpy failSpy(s_vvClient, &VoiceVoxClient::requestFailed);

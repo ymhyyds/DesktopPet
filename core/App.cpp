@@ -23,6 +23,8 @@
 #include "GlobalHotkeyManager.h"
 #include "BedtimeHelper.h"
 
+#include <memory>
+
 #include <QApplication>
 
 #ifdef Q_OS_WIN
@@ -31,6 +33,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QPainter>
+#include <QPointer>
 #include <QStandardPaths>
 #include <QSettings>
 #include <QClipboard>
@@ -347,13 +350,13 @@ bool App::initialize()
 
     // 初始 mask（暂不 show，等 PetWindow show 之后再 show）
 
-    // 模型加载 → mask 更新
+    // 模型加载 → mask 更新（延迟 150ms 等待模型首次渲染完成）
     connect(m_petWindow.get(), &PetWindow::modelSizeLoaded, this, [this]() {
         m_inputProxyWindow->syncGeometry();
-        m_inputProxyWindow->updateInputMask();
+        m_inputProxyWindow->requestInputMaskUpdate(QStringLiteral("model-loaded"), 150);
     });
 
-    // 模型稳定包围盒 → mask 更新
+    // 模型稳定包围盒 → mask 更新（延迟 150ms 等待 tight bounds 稳定）
     // (使用 Live2DView::stableBoundsReady 信号，通过 PetWindow 的 modelSizeLoaded 间接处理，
     //  但 PetWindow 的 stableBoundsReady 连接只调 applyTightSize，不 emit modelSizeLoaded，
     //  所以需要单独连接 live2DView 的信号)
@@ -362,15 +365,15 @@ bool App::initialize()
         if (lv) {
             connect(lv, &Live2DView::stableBoundsReady, this, [this]() {
                 m_inputProxyWindow->syncGeometry();
-                m_inputProxyWindow->updateInputMask();
+                m_inputProxyWindow->requestInputMaskUpdate(QStringLiteral("stable-bounds"), 150);
             });
         }
     }
 
-    // 缩放 → mask 更新
+    // 缩放 → mask 更新（延迟 100ms 等待窗口 resize 完成）
     connect(m_petWindow.get(), &PetWindow::modelScaleChanged, this, [this]() {
         m_inputProxyWindow->syncGeometry();
-        m_inputProxyWindow->updateInputMask();
+        m_inputProxyWindow->requestInputMaskUpdate(QStringLiteral("scale"), 100);
     });
 
     // 拖拽结束 → 吸附检测 + geometry 同步
@@ -461,7 +464,7 @@ bool App::initialize()
 
     // ★ Phase 2: InputProxyWindow 在 PetWindow 显示之后 show，Z-order 在其上方
     m_inputProxyWindow->syncGeometry();  // 同步 PetWindow 放置后的 geometry
-    m_inputProxyWindow->updateInputMask();
+    m_inputProxyWindow->requestInputMaskUpdate(QStringLiteral("init"), 100);
     m_inputProxyWindow->show();
     // 统一同步双窗口 Z-order（替代旧的独立 raise()）
     syncPairedWindowZOrder();
