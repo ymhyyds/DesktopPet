@@ -101,7 +101,9 @@ protected:
 #endif
 
 private:
-    void applyTightSize();
+    void computeAndApplyGeometry(bool preserveAnchor);
+    void computeAndApplyGeometry(const QPoint &oldAnchorGlobal);
+    void computeWindowSize(double scale, double &outW, double &outH) const;
     void updateSpeechBubblePosition();
 
     enum FeedPeriod { Morning, Noon, Afternoon, Evening, Invalid };
@@ -120,6 +122,8 @@ private:
     double m_canvasWidth = 0.0;
     double m_canvasHeight = 0.0;
     double m_currentModelScale = 1.0;
+    int m_modelGeneration = 0;        // incremented on every new model load
+    QMetaObject::Connection m_stableBoundsConnection;
 
     bool m_keepOnTop = true;
 

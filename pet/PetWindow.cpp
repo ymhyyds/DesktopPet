@@ -20,10 +20,12 @@
 #include <QDebug>
 #include <QSettings>
 #include <QApplication>
+#include <QScreen>
 #include <QAbstractNativeEventFilter>
 #include <QTimer>
 
 #include <algorithm>
+#include <cmath>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -55,15 +57,54 @@ PetWindow::PetWindow(const CharacterConfig &initialConfig, QWidget *parent)
         m_tightModelHeight = tightH;
         m_canvasWidth = cw;
         m_canvasHeight = ch;
-        applyTightSize();
+        computeAndApplyGeometry(false);
         emit modelSizeLoaded();
-    });
 
-    // idle 稳定后的包围盒更接近视觉大小，覆盖初始姿态的值
-    connect(m_live2DView, &Live2DView::stableBoundsReady, this, [this](double tightW, double tightH) {
-        m_tightModelWidth  = tightW;
-        m_tightModelHeight = tightH;
-        applyTightSize();
+        // ── 每次模型加载时重新连接 stableBoundsReady，按值捕获当前 generation ──
+        // Live2DView::setupModel() 在 emit modelLoaded 前已启动
+        // QTimer::singleShot(500ms, ...)，旧 timer 未被取消，其 fire 回调如果发生
+        // 在新模型加载之后，generation 检查会使其被安全跳过。
+        if (m_stableBoundsConnection)
+            QObject::disconnect(m_stableBoundsConnection);
+        const int gen = m_modelGeneration;
+        m_stableBoundsConnection = connect(
+            m_live2DView, &Live2DView::stableBoundsReady, this,
+            [this, gen](double tightW, double tightH) {
+                // 1) 在任何状态写入前捕获旧锚点（model pixel rect 独立于 m_tightModel*）
+                QPoint oldAnchor;
+                bool haveOldAnchor = false;
+                {
+                    float mx = 0.0f, my = 0.0f, mw = 0.0f, mh = 0.0f;
+                    if (m_live2DView->getModelPixelRect(mx, my, mw, mh)
+                        && mw > 0.0f && mh > 0.0f
+                        && std::isfinite(mx) && std::isfinite(my)
+                        && std::isfinite(mw) && std::isfinite(mh))
+                    {
+                        oldAnchor = mapToGlobal(
+                            QPoint(qRound(mx + mw * 0.5), qRound(my + mh)));
+                        haveOldAnchor = true;
+                    }
+                }
+
+                // 2) generation 校验 — 在此之前不得修改任何模型相关状态
+                if (gen != m_modelGeneration)
+                    return;
+
+                // 3) 新 bounds 有效性检查
+                if (tightW <= 0.0 || tightH <= 0.0
+                    || !std::isfinite(tightW) || !std::isfinite(tightH))
+                    return;
+
+                // 4) 更新 tight bounds 缓存
+                m_tightModelWidth  = tightW;
+                m_tightModelHeight = tightH;
+
+                // 5) 用预捕获的旧锚点计算新几何
+                if (haveOldAnchor)
+                    computeAndApplyGeometry(oldAnchor);
+                else
+                    computeAndApplyGeometry(true);
+            });
     });
 
     // 好感度变化 在 contextMenuEvent 中与操作文字合并显示，避免重叠
@@ -131,6 +172,11 @@ void PetWindow::applyCharacter(const CharacterConfig &config)
 #endif
     }
 
+    // ── 递增 generation，使上一模型的任何待处理回调立即失效 ──
+    // 同步调用链：loadModel → loadPendingModelIfNeeded → SetupModel → emit modelLoaded
+    // generation 在此处递增，modelLoaded 中只捕获（不再重复递增）
+    m_modelGeneration++;
+
     m_live2DView->loadModel(modelAbsPath);
     m_live2DView->setModelScale(config.modelScale);
     setWindowTitle(config.name);
@@ -143,12 +189,7 @@ void PetWindow::setModelScale(double scale)
     m_live2DView->setModelScale(scale);
 
     if (m_tightModelWidth > 0.0 && m_tightModelHeight > 0.0) {
-        const int oldBottom = y() + height();
-        const int oldCenterX = x() + width() / 2;
-        applyTightSize();
-        // 保持底部中心锚点：桌面宠物缩放时底部不动（脚部位置不变）
-        move(oldCenterX - width() / 2,
-             oldBottom - height());
+        computeAndApplyGeometry(true);
     }
 
     saveState();
@@ -156,51 +197,164 @@ void PetWindow::setModelScale(double scale)
     emit modelScaleChanged(scale);
 }
 
-void PetWindow::applyTightSize()
+void PetWindow::computeWindowSize(double scale, double &outW, double &outH) const
 {
-    if (m_tightModelWidth <= 0.0 || m_tightModelHeight <= 0.0) return;
+    if (m_tightModelHeight <= 0.0 || m_canvasWidth <= 0.0 || m_canvasHeight <= 0.0
+        || !std::isfinite(scale)) {
+        outW = outH = kBaseSize * (std::isfinite(scale) ? qBound(0.3, scale, 10.0) : 1.0);
+        return;
+    }
 
-    double tightW = m_tightModelWidth;
-    double tightH = m_tightModelHeight;
-
-    // ── 安全回退：极端的 tight bounds 宽高比 → 使用 Canvas 比例 ──
-    // 即使进行了 drawable 过滤，某些模型的设计仍可能产生极端比例的 tight bounds
-    // （如只有一个细长 drawable）。回退到 Canvas 比例能保证窗口形状合理。
-    if (m_canvasWidth > 0.0 && m_canvasHeight > 0.0) {
-        const double tightAspect = tightW / tightH;
-        const double canvasAspect = m_canvasWidth / m_canvasHeight;
-        // 允许最大 8:1 窄高或宽扁，超出则使用 Canvas 比例
+    // ── 安全回退：极端的 tight bounds 宽高比 → 使用 Canvas 高度 ──
+    // tight bounds 极窄或极宽时 tightH 可能偏离实际展示比例，
+    // 使用 canvasH 确保 visibleH 公式不产生过大或过小的窗口。
+    double effectiveTightH = m_tightModelHeight;
+    {
+        const double tightAspect = m_tightModelWidth / m_tightModelHeight;
         constexpr double kMinAspect = 0.125;
         constexpr double kMaxAspect = 8.0;
         if (tightAspect < kMinAspect || tightAspect > kMaxAspect) {
-            tightW = m_canvasWidth;
-            tightH = m_canvasHeight;
+            effectiveTightH = m_canvasHeight;
         }
     }
 
-    const double aspect = tightW / tightH;
-    const int basePx = qRound(kBaseSize * m_currentModelScale);
+    constexpr double comp = 1.0 / (1.0 + 2.0 * kAnimMarginRatio);
+    const double divisor = effectiveTightH * comp;
 
-    // ★ 不跨模型归一化：每个模型用自己 idle 稳定后的 tight bounds
-    //   modelH = basePx，modelW 跟随 tight 宽高比，各模型独立视觉大小
-    int modelH = basePx;
-    int modelW = qRound(static_cast<double>(modelH) * aspect);
-
-    const int padPixels = (kPaddingRatio > 0.0)
-        ? qMax(1, qRound(qMin(static_cast<double>(modelW), static_cast<double>(modelH)) * kPaddingRatio))
-        : 0;
-    int padAnimW = qRound(modelW * kAnimMarginRatio);
-    int padAnimH = qRound(modelH * kAnimMarginRatio);
-    int newW = qMax(kMinWindowSize, modelW + qMax(padPixels * 2, padAnimW * 2));
-    int newH = qMax(kMinWindowSize, modelH + qMax(padPixels * 2, padAnimH * 2));
-
-    const int oldW = width(), oldH = height();
-    resize(newW, newH);
-    const int actualW = width(), actualH = height();
-
-    if (m_live2DView) {
-        m_live2DView->setGeometry(rect());
+    // ── 数值安全：接近零或非有限除数 → fallback ──
+    if (!std::isfinite(divisor) || divisor < 1e-9) {
+        outW = outH = kBaseSize * qBound(0.3, scale, 10.0);
+        return;
     }
+
+    // ★ 统一可见高度公式
+    //    visibleH = tightHeight / canvasWidth * widgetWidth * comp = kBaseSize * scale
+    //    → widgetWidth = kBaseSize * scale * canvasWidth / (tightHeight * comp)
+    //    窗口宽高比与 canvas 一致，使 canvas 投影在窗口中居中且边距比例相等。
+    const double widgetW = kBaseSize * scale * m_canvasWidth / divisor;
+    const double widgetH = widgetW * m_canvasHeight / m_canvasWidth;
+
+    // ── 数值安全：非有限结果 → fallback ──
+    constexpr double kMaxWindowDim = 10000.0;
+    if (!std::isfinite(widgetW) || !std::isfinite(widgetH)) {
+        outW = outH = static_cast<double>(kBaseSize);
+        return;
+    }
+
+    outW = qBound(static_cast<double>(kMinWindowSize), widgetW, kMaxWindowDim);
+    outH = qBound(static_cast<double>(kMinWindowSize), widgetH, kMaxWindowDim);
+}
+
+void PetWindow::computeAndApplyGeometry(bool preserveAnchor)
+{
+    if (m_tightModelWidth <= 0.0 || m_tightModelHeight <= 0.0) return;
+    if (m_canvasWidth <= 0.0 || m_canvasHeight <= 0.0) return;
+
+    double newW, newH;
+    computeWindowSize(m_currentModelScale, newW, newH);
+    const int newW_int = qRound(newW);
+    const int newH_int = qRound(newH);
+
+    if (preserveAnchor && m_live2DView) {
+        float mx = 0.0f, my = 0.0f, mw = 0.0f, mh = 0.0f;
+        if (m_live2DView->getModelPixelRect(mx, my, mw, mh)
+            && mw > 0.0f && mh > 0.0f
+            && std::isfinite(mx) && std::isfinite(my)
+            && std::isfinite(mw) && std::isfinite(mh))
+        {
+            const QPoint anchor = mapToGlobal(
+                QPoint(qRound(mx + mw * 0.5), qRound(my + mh)));
+            computeAndApplyGeometry(anchor);  // delegate to QPoint overload
+            return;
+        }
+        // fallthrough if getModelPixelRect failed — no anchor preservation
+    }
+
+    // ── 无锚点保持：保持当前位置，只 resize ──
+    int newX = x(), newY = y();
+    if (!std::isfinite(static_cast<double>(newX)) || !std::isfinite(static_cast<double>(newY)))
+        newX = newY = 0;
+    QRect newRect(newX, newY, newW_int, newH_int);
+
+    // ── 屏幕安全 ──
+    {
+        QScreen *screen = QGuiApplication::screenAt(newRect.center());
+        if (!screen) screen = QGuiApplication::primaryScreen();
+        if (screen) {
+            const QRect avail = screen->availableGeometry();
+            constexpr int minVis = kMinWindowSize;
+            QPoint tl = newRect.topLeft();
+            tl.setX(qBound(avail.left() - newRect.width() + minVis,
+                           tl.x(), avail.right() - minVis));
+            tl.setY(qBound(avail.top() - newRect.height() + minVis,
+                           tl.y(), avail.bottom() - minVis));
+            newRect.moveTopLeft(tl);
+        }
+    }
+    setGeometry(newRect);
+}
+
+void PetWindow::computeAndApplyGeometry(const QPoint &oldAnchorGlobal)
+{
+    if (m_tightModelWidth <= 0.0 || m_tightModelHeight <= 0.0) return;
+    if (m_canvasWidth <= 0.0 || m_canvasHeight <= 0.0) return;
+
+    double newW, newH;
+    computeWindowSize(m_currentModelScale, newW, newH);
+    const int newW_int = qRound(newW);
+    const int newH_int = qRound(newH);
+
+    // ── 锚点保持：使用预捕获的旧锚点（不调用 getModelPixelRect） ──
+    constexpr double comp = 1.0 / (1.0 + 2.0 * kAnimMarginRatio);
+    const double oldW = static_cast<double>(width());
+    const double oldCanvasW_px = oldW * comp;
+    const double oldCanvasX0 = (oldW - oldCanvasW_px) * 0.5;
+    const double oldCanvasH_px = oldCanvasW_px * m_canvasHeight / m_canvasWidth;
+    const double oldCanvasY0 = (static_cast<double>(height()) - oldCanvasH_px) * 0.5;
+
+    const QPoint localOld = mapFromGlobal(oldAnchorGlobal);
+    const double lx = static_cast<double>(localOld.x());
+    const double ly = static_cast<double>(localOld.y());
+    const double nX = (oldCanvasW_px > 0.0)
+        ? (lx - oldCanvasX0) / oldCanvasW_px : 0.5;
+    const double nY = (oldCanvasH_px > 0.0)
+        ? (ly - oldCanvasY0) / oldCanvasH_px : 0.9;
+
+    const double newCanvasW_px = static_cast<double>(newW_int) * comp;
+    const double newCanvasX0 = (static_cast<double>(newW_int) - newCanvasW_px) * 0.5;
+    const double newCanvasH_px = newCanvasW_px * m_canvasHeight / m_canvasWidth;
+    const double newCanvasY0 = (static_cast<double>(newH_int) - newCanvasH_px) * 0.5;
+
+    const double newLX = newCanvasX0 + nX * newCanvasW_px;
+    const double newLY = newCanvasY0 + nY * newCanvasH_px;
+
+    int newX = oldAnchorGlobal.x() - (std::isfinite(newLX) ? qRound(newLX) : 0);
+    int newY = oldAnchorGlobal.y() - (std::isfinite(newLY) ? qRound(newLY) : 0);
+
+    // ── 数值安全 ──
+    if (!std::isfinite(static_cast<double>(newX)) || !std::isfinite(static_cast<double>(newY))) {
+        newX = x();
+        newY = y();
+    }
+
+    QRect newRect(newX, newY, newW_int, newH_int);
+
+    // ── 屏幕安全 ──
+    {
+        QScreen *screen = QGuiApplication::screenAt(newRect.center());
+        if (!screen) screen = QGuiApplication::primaryScreen();
+        if (screen) {
+            const QRect avail = screen->availableGeometry();
+            constexpr int minVis = kMinWindowSize;
+            QPoint tl = newRect.topLeft();
+            tl.setX(qBound(avail.left() - newRect.width() + minVis,
+                           tl.x(), avail.right() - minVis));
+            tl.setY(qBound(avail.top() - newRect.height() + minVis,
+                           tl.y(), avail.bottom() - minVis));
+            newRect.moveTopLeft(tl);
+        }
+    }
+    setGeometry(newRect);
 }
 
 void PetWindow::setEmotion(PetAnimationState emotion)
