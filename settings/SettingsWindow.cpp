@@ -1,7 +1,9 @@
 #include "SettingsWindow.h"
 #include "../core/BedtimeHelper.h"
+#include "../ai/PromptManager.h"
 
 #include <QLineEdit>
+#include <QPlainTextEdit>
 #include <QCheckBox>
 #include <QComboBox>
 #include <QSpinBox>
@@ -291,6 +293,55 @@ void SettingsWindow::setupUi()
 
     connect(m_bedtimeResetBtn, &QPushButton::clicked, this, &SettingsWindow::onBedtimeResetClicked);
 
+    // ──── AI 说话风格 ────
+    auto *styleGroup = new QGroupBox(QStringLiteral("AI 说话风格"), this);
+    auto *styleLayout = new QVBoxLayout(styleGroup);
+
+    m_stylePromptEdit = new QPlainTextEdit(this);
+    m_stylePromptEdit->setPlaceholderText(
+        QStringLiteral("例如：活泼可爱，称呼用户为主人，喜欢用颜文字，每句话结尾加上喵~"));
+    m_stylePromptEdit->setFixedHeight(80);
+    m_stylePromptEdit->setTabChangesFocus(true);
+
+    // 字数限制：最多 2000 字符
+    connect(m_stylePromptEdit, &QPlainTextEdit::textChanged, this, [this]() {
+        QString text = m_stylePromptEdit->toPlainText();
+        if (text.length() > 2000) {
+            text = text.left(2000);
+            // 阻塞信号以避免递归
+            QSignalBlocker blocker(m_stylePromptEdit);
+            m_stylePromptEdit->setPlainText(text);
+            // 把光标移到尾部
+            QTextCursor cursor = m_stylePromptEdit->textCursor();
+            cursor.movePosition(QTextCursor::End);
+            m_stylePromptEdit->setTextCursor(cursor);
+        }
+        m_stylePromptCountLabel->setText(
+            QStringLiteral("%1 / 2000 字").arg(text.length()));
+    });
+
+    m_stylePromptCountLabel = new QLabel(QStringLiteral("0 / 2000 字"), this);
+    m_stylePromptCountLabel->setStyleSheet(QStringLiteral("font-size: 11px; color: #888;"));
+
+    auto *styleBtnRow = new QHBoxLayout();
+    m_styleResetBtn = new QPushButton(QStringLiteral("恢复默认"), this);
+    styleBtnRow->addWidget(m_styleResetBtn);
+    styleBtnRow->addStretch();
+
+    auto *styleHint = new QLabel(
+        QStringLiteral("用于控制 AI 的语气、称呼和表达方式，不影响 API 地址和模型设置。"),
+        this);
+    styleHint->setStyleSheet(QStringLiteral("font-size: 11px; color: #888;"));
+    styleHint->setWordWrap(true);
+
+    styleLayout->addWidget(m_stylePromptEdit);
+    styleLayout->addWidget(m_stylePromptCountLabel);
+    styleLayout->addLayout(styleBtnRow);
+    styleLayout->addWidget(styleHint);
+    styleGroup->setLayout(styleLayout);
+
+    connect(m_styleResetBtn, &QPushButton::clicked, this, &SettingsWindow::onStyleResetClicked);
+
     // --- 保存按钮 ---
     m_saveButton = new QPushButton(QStringLiteral("保存"), this);
     connect(m_saveButton, &QPushButton::clicked, this, &SettingsWindow::onSaveClicked);
@@ -307,6 +358,7 @@ void SettingsWindow::setupUi()
     contentLayout->addWidget(chatBgGroup);
     contentLayout->addWidget(bubbleGroup);
     contentLayout->addWidget(bedtimeGroup);
+    contentLayout->addWidget(styleGroup);
     contentLayout->addWidget(interactionGroup);
     contentLayout->addStretch();
 
@@ -413,6 +465,20 @@ void SettingsWindow::onSaveClicked()
         const QString cleanMsg = BedtimeHelper::sanitizeBedtimeMessage(m_bedtimeEdit->text());
         m_bedtimeEdit->setText(cleanMsg);
         emit bedtimeMessageChanged(cleanMsg);
+    }
+
+    // ──── AI 说话风格 ────
+    {
+        QString style = m_stylePromptEdit->toPlainText().trimmed();
+        if (style.length() > 2000) {
+            style = style.left(2000);
+        }
+        // 回填清洗后的文本到输入框
+        QSignalBlocker blocker(m_stylePromptEdit);
+        m_stylePromptEdit->setPlainText(style);
+        m_stylePromptCountLabel->setText(
+            QStringLiteral("%1 / 2000 字").arg(style.length()));
+        emit aiStylePromptChanged(style);
     }
 
     const int backend = m_backendCombo->currentData().toInt();
@@ -775,6 +841,32 @@ void SettingsWindow::onEdgeTestSpeechClicked()
 void SettingsWindow::onBedtimeResetClicked()
 {
     m_bedtimeEdit->setText(QStringLiteral("主人，已经很晚啦，早点休息吧喵～"));
+}
+
+void SettingsWindow::onStyleResetClicked()
+{
+    // 恢复默认：文本框显示实际默认文本，但保存空值作为"使用默认"的标记
+    const QString defaultText = PromptManager::defaultAiStylePrompt();
+    {
+        QSignalBlocker blocker(m_stylePromptEdit);
+        m_stylePromptEdit->setPlainText(defaultText);
+        m_stylePromptCountLabel->setText(
+            QStringLiteral("%1 / 2000 字").arg(defaultText.length()));
+    }
+    // 保存空值 = 使用默认风格（不在 QSettings 中存大段文本）
+    emit aiStylePromptChanged(QString());
+}
+
+void SettingsWindow::setAiStylePrompt(const QString &prompt)
+{
+    QString text = prompt.trimmed();
+    if (text.length() > 2000) {
+        text = text.left(2000);
+    }
+    QSignalBlocker blocker(m_stylePromptEdit);
+    m_stylePromptEdit->setPlainText(text);
+    m_stylePromptCountLabel->setText(
+        QStringLiteral("%1 / 2000 字").arg(text.length()));
 }
 
 void SettingsWindow::setBedtimeReminderEnabled(bool enabled)

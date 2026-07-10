@@ -11,7 +11,7 @@ class QSpinBox;
 class QSlider;
 class QLabel;
 class QPushButton;
-class QSpinBox;
+class QPlainTextEdit;
 class Live2DView;
 
 /**
@@ -60,6 +60,9 @@ public:
     void setBedtimeMessage(const QString &msg);
     void setBedtimeRandomEnabled(bool enabled);
 
+    /// AI 说话风格
+    void setAiStylePrompt(const QString &prompt);
+
 public slots:
     void showAndRaise();
 
@@ -100,6 +103,9 @@ signals:
     void bedtimeMessageChanged(const QString &msg);
     void bedtimeRandomToggled(bool enabled);
 
+    /// AI 说话风格
+    void aiStylePromptChanged(const QString &stylePrompt);
+
 protected:
     void closeEvent(QCloseEvent *event) override;
 
@@ -116,6 +122,7 @@ private slots:
     void onEdgeBrowseClicked();
     void onEdgeTestSpeechClicked();
     void onBedtimeResetClicked();
+    void onStyleResetClicked();
 
 private:
     void setupUi();
@@ -173,4 +180,9 @@ private:
     QCheckBox   *m_bedtimeRandomCheckBox = nullptr;
     QLineEdit   *m_bedtimeEdit          = nullptr;
     QPushButton *m_bedtimeResetBtn      = nullptr;
+
+    // ──── AI 说话风格 ────
+    QPlainTextEdit *m_stylePromptEdit   = nullptr;
+    QLabel         *m_stylePromptCountLabel = nullptr;
+    QPushButton    *m_styleResetBtn     = nullptr;
 };

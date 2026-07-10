@@ -348,6 +348,14 @@ bool App::initialize()
         qInfo() << "[App] 恢复挂机超时设置：" << clampedMinutes << "分钟";
     }
 
+    // ── 恢复 AI 说话风格 ──
+    {
+        QSettings ss(QStringLiteral("DesktopPet"), QStringLiteral("App"));
+        const QString savedStyle = ss.value(QStringLiteral("ai/stylePrompt")).toString();
+        m_promptManager->setAiStylePrompt(savedStyle);
+        qInfo() << "[App] 恢复 AI 说话风格";
+    }
+
     // 初始 mask（暂不 show，等 PetWindow show 之后再 show）
 
     // 模型加载 → mask 更新（延迟 150ms 等待模型首次渲染完成）
@@ -865,6 +873,17 @@ void App::setupConnections()
                 qInfo() << "[Bedtime] 消息已更新";
             });
 
+    // ──── AI 说话风格 ────
+    connect(m_settingsWindow.get(), &SettingsWindow::aiStylePromptChanged,
+            this, [this](const QString &stylePrompt) {
+                m_promptManager->setAiStylePrompt(stylePrompt);
+                QSettings(QStringLiteral("DesktopPet"), QStringLiteral("App"))
+                    .setValue(QStringLiteral("ai/stylePrompt"), stylePrompt);
+                // 回填 UI 显示有效值（空值 → 显示默认风格文本）
+                m_settingsWindow->setAiStylePrompt(m_promptManager->effectiveAiStylePrompt());
+                qInfo() << "[App] AI 说话风格已更新";
+            });
+
     // ★ 设置 → 随机文案切换
     connect(m_settingsWindow.get(), &SettingsWindow::bedtimeRandomToggled,
             this, [this](bool enabled) {
@@ -1247,6 +1266,9 @@ void App::openSettingsWindow()
     m_settingsWindow->setBedtimeReminderEnabled(m_bedtimeReminderEnabled);
     m_settingsWindow->setBedtimeMessage(m_bedtimeMessage);
     m_settingsWindow->setBedtimeRandomEnabled(m_bedtimeUseRandom);
+
+    // ──── AI 说话风格（使用有效值：空值 → 显示默认风格）────
+    m_settingsWindow->setAiStylePrompt(m_promptManager->effectiveAiStylePrompt());
 
     // 📸 当前截图保存路径
     {
