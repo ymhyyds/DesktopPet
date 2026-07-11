@@ -71,6 +71,7 @@ public:
     explicit PromptManagerWeatherTest() = default;
 
 private slots:
+    // ── 环境上下文 ──
     void testBuildEnvironmentContextWithWeather();
     void testBuildEnvironmentContextWithoutWeather();
     void testBuildEnvironmentContextDisabled();
@@ -78,4 +79,13 @@ private slots:
     void testProactivePromptHasEnvironment();
     void testNoLongTermPollution();
     void testWeatherResetOnEmptyContext();
+
+    // ── AI 说话风格 ──
+    void testDefaultStyleInContextHistory();
+    void testDefaultToCustomStyle();
+    void testCustomAToCustomB();
+    void testCustomToDefaultStyle();
+    void testSameStyleNoop();
+    void testStyleNormalization();
+    void testContextHistoryNoStyleLeak();
 };

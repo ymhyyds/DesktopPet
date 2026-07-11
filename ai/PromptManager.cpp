@@ -21,6 +21,29 @@ void PromptManager::setPersonality(const QString &personality, const QString &ch
     clearHistory();
 }
 
+QString PromptManager::normalizeStylePrompt(const QString &prompt)
+{
+    QString normalized = prompt.trimmed();
+    if (normalized.length() > 2000)
+        normalized = normalized.left(2000);
+    return normalized;
+}
+
+void PromptManager::setAiStylePrompt(const QString &prompt)
+{
+    const QString oldEffective = effectiveAiStylePrompt();
+    const QString normalized = normalizeStylePrompt(prompt);
+
+    if (m_stylePrompt == normalized)
+        return;
+
+    m_stylePrompt = normalized;
+
+    // 有效风格变化时清空 API 上下文（UI 聊天记录不受影响）
+    if (oldEffective != effectiveAiStylePrompt())
+        clearHistory();
+}
+
 QString PromptManager::defaultAiStylePrompt()
 {
     return QStringLiteral(
@@ -145,4 +168,5 @@ QString PromptManager::buildProactivePrompt() const
 void PromptManager::clearHistory()
 {
     m_history.clear();
+    m_conversationGeneration++;
 }

@@ -39,9 +39,11 @@ public:
     /// 获取当前用户自定义的说话风格提示词。
     QString aiStylePrompt() const { return m_stylePrompt; }
 
-    /// 设置用户自定义的说话风格提示词。会在下一次 contextHistory() 调用时生效。
+    /// 设置用户自定义的说话风格提示词。
+    /// 当有效风格实际发生变化时，自动清除 API 对话历史（UI 聊天记录不受影响），
+    /// 确保下一次 API 请求从干净的上下文开始。
     /// 空白内容会被视为"无自定义风格"，自动回退到默认行为。
-    void setAiStylePrompt(const QString &prompt) { m_stylePrompt = prompt.trimmed(); }
+    void setAiStylePrompt(const QString &prompt);
 
     /// 返回实际生效的说话风格提示词：非空时返回 m_stylePrompt，否则返回 defaultAiStylePrompt()。
     QString effectiveAiStylePrompt() const
@@ -68,7 +70,12 @@ public:
      */
     QString buildProactivePrompt() const;
 
+    /// 返回当前对话代数。每次 clearHistory() 或有效风格变化导致的清空时递增。
+    /// 用于异步请求路径中判断回复是否仍属于当前上下文。
+    int conversationGeneration() const { return m_conversationGeneration; }
+
     /// 清空对话历史（不影响人格设定），用于"重置话题"之类的场景。
+    /// 同时递增 conversationGeneration。
     void clearHistory();
 
     /// 历史消息最多保留多少轮（一轮 = 一条 user + 一条 assistant），超出自动裁剪最旧的。
@@ -86,6 +93,7 @@ public:
     QString buildEnvironmentContext() const;
 
 private:
+    static QString normalizeStylePrompt(const QString &prompt);
     void trimHistoryIfNeeded();
 
 private:
@@ -95,4 +103,5 @@ private:
     int m_maxHistoryTurns = 10;   // 默认保留最近 10 轮，平衡上下文连贯性和请求体大小
     bool m_timeAwareness = true;
     QString m_weatherContext;     // 由 WeatherManager 构建，仅含天气部分
+    int m_conversationGeneration = 0;
 };

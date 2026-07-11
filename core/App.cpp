@@ -531,6 +531,7 @@ void App::setupConnections()
                     auto history = m_promptManager->contextHistory();
                     history.append(ChatMessage(QStringLiteral("user"), prompt));
                     m_aiBusy = true;
+                    m_lastSentGeneration = m_promptManager->conversationGeneration();
                     m_aiClient->sendMessage(prompt, history);
                 }
             });
@@ -563,6 +564,7 @@ void App::setupConnections()
                 m_promptManager->appendUserMessage(text);
                 m_memoryDb->saveMessage(m_currentCharacter, QStringLiteral("user"), text);
                 m_aiBusy = true;
+                m_lastSentGeneration = m_promptManager->conversationGeneration();
                 m_aiClient->sendMessage(text, m_promptManager->contextHistory());
             });
 
@@ -588,9 +590,17 @@ void App::setupConnections()
                 m_aiBusy = false;
                 m_chatWindow->finishAssistantMessage();
 
-                // 记忆落库
-                m_promptManager->appendAssistantMessage(reply);
-                m_memoryDb->saveMessage(m_currentCharacter, QStringLiteral("assistant"), reply);
+                const int replyGen = m_promptManager->conversationGeneration();
+
+                // 记忆落库（仅当回复仍属于当前 generation）
+                if (replyGen == m_lastSentGeneration) {
+                    m_promptManager->appendAssistantMessage(reply);
+                    m_memoryDb->saveMessage(m_currentCharacter, QStringLiteral("assistant"), reply);
+                } else {
+                    qInfo() << "[App] 放弃旧请求回复：conversationGeneration 已变化"
+                            << "(replyGen=" << replyGen
+                            << ", lastSent=" << m_lastSentGeneration << ")";
+                }
 
                 // 情绪分析 → Live2D 表情
                 const EmotionResult emotion = m_emotionAnalyzer->analyze(reply);
