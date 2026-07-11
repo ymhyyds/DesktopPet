@@ -170,6 +170,11 @@ private:
     // --- AI 请求繁忙标志（防止挂机主动请求覆盖流式 buffer） ---
     bool m_aiBusy = false;
 
+    /// 最近一次发送请求时的 conversationGeneration。
+    /// 回复到达时与之比较，若已变化则放弃将回复写入 API history
+    /// （防止风格切换后旧请求返回污染新上下文）。
+    int m_lastSentGeneration = -1;
+
     // --- Edge TTS 测试语音状态 ────
     bool m_testSpeechInProgress = false;
 };

@@ -596,15 +596,25 @@ void PromptManagerWeatherTest::testEnvironmentContextInContextHistory()
 
     const auto history = pm.contextHistory();
 
-    // 第一个消息是 system prompt（人格）
-    QCOMPARE(history.size(), 2); // system + env (no chat history)
-    QCOMPARE(history[0].first, QStringLiteral("system"));
-    QCOMPARE(history[1].first, QStringLiteral("system"));
+    // contextHistory() 前部包含且仅包含:
+    //   0: 1 条基础人格 system 消息
+    //   1: 1 条当前 effective style system 消息
+    //   2: 1 条当前环境 system 消息
+    // 之后才是 chat history（本测试无对话，故总共 3 条）
+    QCOMPARE(history.size(), 3);
 
-    // 第二个 system 消息应包含环境信息
-    QVERIFY(history[1].second.contains(QStringLiteral("[当前环境信息]")));
-    QVERIFY(history[1].second.contains(QStringLiteral("台北")));
-    QVERIFY(history[1].second.contains(QStringLiteral("28°C")));
+    // 验证三条 system 消息职责明确
+    QCOMPARE(history[0].first, QStringLiteral("system")); // 人格
+    QCOMPARE(history[1].first, QStringLiteral("system")); // 风格
+    QCOMPARE(history[2].first, QStringLiteral("system")); // 环境
+
+    // 风格消息应包含当前 effectiveAiStylePrompt()
+    QVERIFY(history[1].second.contains(QStringLiteral("用户自定义的说话风格要求")));
+
+    // 环境消息应包含预期天气/时间信息
+    QVERIFY(history[2].second.contains(QStringLiteral("[当前环境信息]")));
+    QVERIFY(history[2].second.contains(QStringLiteral("台北")));
+    QVERIFY(history[2].second.contains(QStringLiteral("28°C")));
 }
 
 void PromptManagerWeatherTest::testProactivePromptHasEnvironment()
@@ -653,16 +663,36 @@ void PromptManagerWeatherTest::testNoLongTermPollution()
         }
     }
 
-    // 检查内部 m_history 也不应包含环境信息（私有成员通过公有 API 验证）
-    // 直接检查 contextHistory 中 system 消息的数量
+    // 验证 system 消息数量和职责: 人格 + 风格 + 环境 = 3
     int systemCount = 0;
+    int styleCount = 0;
+    int envCount = 0;
     for (const auto &msg : history) {
         if (msg.first == QStringLiteral("system")) {
             ++systemCount;
+            if (msg.second.contains(QStringLiteral("用户自定义的说话风格要求")))
+                ++styleCount;
+            if (msg.second.contains(QStringLiteral("[当前环境信息]")))
+                ++envCount;
         }
     }
-    // 期望: 1 个人格 system + 1 个环境 system
-    QCOMPARE(systemCount, 2);
+    QCOMPARE(systemCount, 3);
+    QCOMPARE(styleCount, 1);
+    QCOMPARE(envCount, 1);
+
+    // 多次调用 contextHistory() 不会把 system/style/environment 永久写入 m_history
+    const auto history2 = pm.contextHistory();
+    int systemCount2 = 0;
+    int userAssist2 = 0;
+    for (const auto &msg : history2) {
+        if (msg.first == QStringLiteral("system"))
+            ++systemCount2;
+        else
+            ++userAssist2;
+    }
+    QCOMPARE(systemCount2, 3);       // system 数量不变
+    QCOMPARE(static_cast<int>(history.size()), static_cast<int>(history2.size())); // 总大小不变
+    QCOMPARE(userAssist2, 4);        // 2 user + 2 assistant，未因调用 contextHistory() 增加
 }
 
 void PromptManagerWeatherTest::testWeatherResetOnEmptyContext()
@@ -677,6 +707,173 @@ void PromptManagerWeatherTest::testWeatherResetOnEmptyContext()
     pm.setWeatherContext({});
     QVERIFY(!pm.buildEnvironmentContext().contains(QStringLiteral("台北")));
     QVERIFY(pm.buildEnvironmentContext().contains(QStringLiteral("[/当前环境信息]")));
+}
+
+
+// ======================================================================
+// PromptManagerWeatherTest — AI 说话风格
+// ======================================================================
+
+void PromptManagerWeatherTest::testDefaultStyleInContextHistory()
+{
+    PromptManager pm;
+    const auto history = pm.contextHistory();
+
+    // 基础结构：contextHistory() 前部至少 3 条 system 消息
+    QVERIFY(history.size() >= 3);
+
+    // 第 0 条: 人格 system（可能为空，未调用 setPersonality）
+    QCOMPARE(history[0].first, QStringLiteral("system"));
+    // 第 1 条: 风格 system
+    QCOMPARE(history[1].first, QStringLiteral("system"));
+    QVERIFY(history[1].second.contains(QStringLiteral("用户自定义的说话风格要求")));
+    // 第 2 条: 环境 system
+    QCOMPARE(history[2].first, QStringLiteral("system"));
+    QVERIFY(history[2].second.contains(QStringLiteral("[当前环境信息]")));
+}
+
+void PromptManagerWeatherTest::testDefaultToCustomStyle()
+{
+    PromptManager pm;
+    const int genBefore = pm.conversationGeneration();
+
+    // 在默认风格下添加一条对话
+    pm.appendUserMessage(QStringLiteral("你好"));
+    QVERIFY(pm.contextHistory().size() > 3); // 3 system + ≥1 user
+
+    // 切换到自定义风格
+    pm.setAiStylePrompt(QStringLiteral("冷静、简洁"));
+
+    // effective style 已更新
+    QCOMPARE(pm.aiStylePrompt(), QStringLiteral("冷静、简洁"));
+    QVERIFY(pm.effectiveAiStylePrompt().contains(QStringLiteral("冷静")));
+
+    // conversation history 被清空 → 只有 3 条 system 消息
+    QCOMPARE(pm.contextHistory().size(), 3);
+
+    // generation 递增一次
+    QCOMPARE(pm.conversationGeneration(), genBefore + 1);
+}
+
+void PromptManagerWeatherTest::testCustomAToCustomB()
+{
+    PromptManager pm;
+    pm.setAiStylePrompt(QStringLiteral("冷静"));
+    const int gen1 = pm.conversationGeneration();
+    pm.appendUserMessage(QStringLiteral("测试"));
+
+    // 切换到另一自定义风格
+    pm.setAiStylePrompt(QStringLiteral("活泼"));
+
+    // history 被清空
+    QCOMPARE(pm.contextHistory().size(), 3);
+
+    // generation 递增一次
+    QCOMPARE(pm.conversationGeneration(), gen1 + 1);
+
+    // 风格消息内容已更新，不含旧风格
+    const auto history = pm.contextHistory();
+    QVERIFY(history[1].second.contains(QStringLiteral("用户自定义的说话风格要求")));
+    QVERIFY(history[1].second.contains(QStringLiteral("活泼")));
+    QVERIFY(!history[1].second.contains(QStringLiteral("冷静")));
+}
+
+void PromptManagerWeatherTest::testCustomToDefaultStyle()
+{
+    PromptManager pm;
+    pm.setAiStylePrompt(QStringLiteral("专业"));
+    pm.appendUserMessage(QStringLiteral("测试"));
+
+    // 恢复默认（空字符串）
+    pm.setAiStylePrompt(QString());
+
+    // aiStylePrompt() 为空（自定义已清除）
+    QVERIFY(pm.aiStylePrompt().isEmpty());
+
+    // effectiveAiStylePrompt() 非空（回退到默认猫娘风格）
+    QVERIFY(!pm.effectiveAiStylePrompt().isEmpty());
+
+    // history 清空
+    const auto history = pm.contextHistory();
+    QCOMPARE(history.size(), 3);
+
+    // 风格消息存在，且不含旧自定义内容
+    QVERIFY(history[1].second.contains(QStringLiteral("用户自定义的说话风格要求")));
+    QVERIFY(!history[1].second.contains(QStringLiteral("专业")));
+}
+
+void PromptManagerWeatherTest::testSameStyleNoop()
+{
+    PromptManager pm;
+    pm.setAiStylePrompt(QStringLiteral("简洁"));
+    const int genBefore = pm.conversationGeneration();
+
+    pm.appendUserMessage(QStringLiteral("你好"));
+    const int sizeBefore = pm.contextHistory().size();
+
+    // 重复设置相同（归一化后相同）的风格
+    pm.setAiStylePrompt(QStringLiteral("简洁"));
+
+    // history 不清空 → context 元素数不变
+    QCOMPARE(pm.contextHistory().size(), sizeBefore);
+
+    // generation 不递增
+    QCOMPARE(pm.conversationGeneration(), genBefore);
+}
+
+void PromptManagerWeatherTest::testStyleNormalization()
+{
+    PromptManager pm;
+
+    // 前后空格被 trim
+    pm.setAiStylePrompt(QStringLiteral("  简洁  "));
+    QCOMPARE(pm.aiStylePrompt(), QStringLiteral("简洁"));
+
+    // 纯空格等同于清除 → aiStylePrompt 为空
+    pm.setAiStylePrompt(QStringLiteral("   "));
+    QVERIFY(pm.aiStylePrompt().isEmpty());
+
+    // 超过 2000 字符被截断
+    const QString longStyle(2500, QChar('A'));
+    pm.setAiStylePrompt(longStyle);
+    QCOMPARE(pm.aiStylePrompt().length(), 2000);
+}
+
+void PromptManagerWeatherTest::testContextHistoryNoStyleLeak()
+{
+    PromptManager pm;
+
+    // 第一次获取 contextHistory（默认风格）
+    const auto h1 = pm.contextHistory();
+    QVERIFY(h1.size() >= 3);
+
+    // 切换到自定义风格
+    pm.setAiStylePrompt(QStringLiteral("简洁专业"));
+
+    // 第二次获取：只有当前风格，不残留默认风格
+    const auto h2 = pm.contextHistory();
+    int styleMsgCount = 0;
+    for (const auto &msg : h2) {
+        if (msg.first == QStringLiteral("system") &&
+            msg.second.contains(QStringLiteral("用户自定义的说话风格要求"))) {
+            ++styleMsgCount;
+            QVERIFY(msg.second.contains(QStringLiteral("简洁专业")));
+        }
+    }
+    QCOMPARE(styleMsgCount, 1);
+
+    // 再切换一次，同样只有新风格
+    pm.setAiStylePrompt(QStringLiteral("温柔"));
+    const auto h3 = pm.contextHistory();
+    styleMsgCount = 0;
+    for (const auto &msg : h3) {
+        if (msg.first == QStringLiteral("system") &&
+            msg.second.contains(QStringLiteral("用户自定义的说话风格要求"))) {
+            ++styleMsgCount;
+            QVERIFY(msg.second.contains(QStringLiteral("温柔")));
+        }
+    }
+    QCOMPARE(styleMsgCount, 1);
 }
 
 
