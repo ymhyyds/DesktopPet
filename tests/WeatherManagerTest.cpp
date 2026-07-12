@@ -3077,7 +3077,52 @@ void PromptManagerSummaryTest::testDetailFidelity_ConflictingLocationNotMerged()
     QVERIFY(formatted.indexOf(QStringLiteral("浅草寺")) > unconfirmedIdx);
 }
 
+// ──── 严格复述规则加固 ────
 
-// ======================================================================
+void PromptManagerSummaryTest::testStrictRepetitionRulesInContextHistory()
+{
+    // 验证 contextHistory() 输出的对话摘要中包含新增的核心复述规则（13-14）
+    PromptManager pm;
+
+    pm.appendUserMessage(QStringLiteral("帮我规划京都旅行"));
+    pm.appendAssistantMessage(QStringLiteral("好的喵~"));
+    pm.beginStyleTransition();
+    pm.completeStyleTransition(QStringLiteral("专业"), QStringLiteral(
+        "话题：京都旅行\n"
+        "用户事实：计划去京都旅行"));
+
+    const auto history = pm.contextHistory();
+
+    QString summaryBlock;
+    for (const auto &msg : history) {
+        if (msg.first == QStringLiteral("system") &&
+            msg.second.contains(QStringLiteral("[对话摘要]"))) {
+            summaryBlock = msg.second;
+            break;
+        }
+    }
+    QVERIFY(!summaryBlock.isEmpty());
+
+    // 规则 13: 限定词保留（例如、比如、假设、暂定、以...为例）
+    QVERIFY2(summaryBlock.contains(QStringLiteral("例如")) &&
+             summaryBlock.contains(QStringLiteral("假设")) &&
+             summaryBlock.contains(QStringLiteral("暂定")) &&
+             summaryBlock.contains(QStringLiteral("示例")),
+             "规则13：必须要求保留'例如/假设/暂定/以...为例'等限定词");
+
+    // 规则 13 第二句：确认方案≠确认示例地点
+    QVERIFY2(summaryBlock.contains(QStringLiteral("不代表确认")),
+             "规则13：确认方案不代表确认示例地点");
+
+    // 规则 14: 房型未指定
+    QVERIFY2(summaryBlock.contains(QStringLiteral("房型未指定")),
+             "规则14：必须要求原文无房型时回答'房型未指定'");
+
+    // 规则 14 第二句：位置未指定适用范围
+    QVERIFY2(summaryBlock.contains(QStringLiteral("位置未指定")) &&
+             summaryBlock.contains(QStringLiteral("住宿")) &&
+             summaryBlock.contains(QStringLiteral("具名的景点")),
+             "规则14：位置未指定仅适用于无位置的住宿，不得用于已具名景点");
+}
 // 本文件由 test_main.cpp #include 包含，不单独编译
 // ======================================================================

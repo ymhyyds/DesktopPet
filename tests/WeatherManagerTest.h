@@ -204,4 +204,7 @@ private slots:
     void testDetailFidelity_LocationNotNarrowed();
     void testDetailFidelity_ConfirmationPreservesContent();
     void testDetailFidelity_ConflictingLocationNotMerged();
+
+    // ---- strict repetition 加固 ----
+    void testStrictRepetitionRulesInContextHistory();
 };
