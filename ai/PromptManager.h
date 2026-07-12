@@ -20,6 +20,8 @@ using ChatMessage = QPair<QString, QString>; // first: role, second: content
  * 不负责：实际发 HTTP 请求（那是 DeepSeekClient 的事），
  * 也不负责：从回复里识别情绪（那是 EmotionAnalyzer 的事）。
  */
+class EvidenceManager;
+
 class PromptManager
 {
 public:
@@ -43,6 +45,7 @@ public:
     /// 当有效风格实际发生变化时，自动清除 API 对话历史（UI 聊天记录不受影响），
     /// 确保下一次 API 请求从干净的上下文开始。
     /// 空白内容会被视为"无自定义风格"，自动回退到默认行为。
+    /// 对于需要异步摘要的风格切换，使用 beginStyleTransition() / completeStyleTransition() 代替。
     void setAiStylePrompt(const QString &prompt);
 
     /// 返回实际生效的说话风格提示词：非空时返回 m_stylePrompt，否则返回 defaultAiStylePrompt()。
@@ -50,6 +53,9 @@ public:
     {
         return m_stylePrompt.isEmpty() ? defaultAiStylePrompt() : m_stylePrompt;
     }
+
+    /// 归一化风格提示词（trim + 截断 2000 字）。
+    static QString normalizeStylePrompt(const QString &prompt);
 
     /// 把用户消息加入历史（同时做长度裁剪）。
     void appendUserMessage(const QString &content);
@@ -74,9 +80,48 @@ public:
     /// 用于异步请求路径中判断回复是否仍属于当前上下文。
     int conversationGeneration() const { return m_conversationGeneration; }
 
-    /// 清空对话历史（不影响人格设定），用于"重置话题"之类的场景。
+    /// 清空对话历史和中立摘要（不影响人格设定），用于"重置话题"、角色切换等场景。
     /// 同时递增 conversationGeneration。
     void clearHistory();
+
+    // ──── 异步风格切换接口（替代 setAiStylePrompt 的直接清空） ────
+
+    /**
+     * @brief 开始风格切换事务。
+     * - 创建当前普通 user/assistant history 的不可变快照
+     * - conversationGeneration 立即递增（使在途旧回复不写入新 history）
+     * - 清空 m_history
+     * @return 切换前 user/assistant history 的快照（用于异步摘要请求）
+     */
+    QList<ChatMessage> beginStyleTransition();
+
+    /**
+     * @brief 完成风格切换：设置新风格并保存中立摘要。
+     * 不重复清空 m_history（已在 beginStyleTransition 中完成），
+     * 不重复递增 generation。
+     * @param stylePrompt 归一化后的目标风格
+     * @param neutralSummary 解析后的中立摘要文本（空 = 无摘要）
+     */
+    void completeStyleTransition(const QString &stylePrompt, const QString &neutralSummary);
+
+    /**
+     * @brief 摘要失败时的安全 fallback：仅保留最近的 user 消息完成切换。
+     * @param stylePrompt 归一化后的目标风格
+     * @param userMessages 要保留的 user 消息列表（按时间正序）
+     */
+    void completeStyleTransitionWithFallback(const QString &stylePrompt, const QStringList &userMessages);
+
+    /// 返回当前存储的中立对话摘要（空字符串表示无摘要）。
+    QString conversationSummary() const { return m_conversationSummary; }
+
+    /// 设置 EvidenceManager 指针（非拥有），用于 contextHistory() 中注入原始证据块。
+    void setEvidenceManager(EvidenceManager *mgr) { m_evidenceManager = mgr; }
+
+    /// 返回当前绑定的 EvidenceManager 指针（可能为 nullptr）。
+    const EvidenceManager *evidenceManager() const { return m_evidenceManager; }
+
+    /// 当前是否有普通对话历史（用于判断是否需要摘要）。
+    bool hasConversationHistory() const { return !m_history.isEmpty(); }
 
     /// 历史消息最多保留多少轮（一轮 = 一条 user + 一条 assistant），超出自动裁剪最旧的。
     void setMaxHistoryTurns(int turns) { m_maxHistoryTurns = turns; }
@@ -93,7 +138,6 @@ public:
     QString buildEnvironmentContext() const;
 
 private:
-    static QString normalizeStylePrompt(const QString &prompt);
     void trimHistoryIfNeeded();
 
 private:
@@ -104,4 +148,10 @@ private:
     bool m_timeAwareness = true;
     QString m_weatherContext;     // 由 WeatherManager 构建，仅含天气部分
     int m_conversationGeneration = 0;
+
+    /// 风格切换时生成的中立摘要，通过 contextHistory() 注入为 system 消息。
+    QString m_conversationSummary;
+
+    /// 原始对话证据管理器（非拥有指针，可为 nullptr）。
+    EvidenceManager *m_evidenceManager = nullptr;
 };

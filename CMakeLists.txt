@@ -68,6 +68,8 @@ set(AI_SOURCES
     ai/DeepSeekClient.h
     ai/PromptManager.cpp
     ai/PromptManager.h
+    ai/EvidenceManager.cpp
+    ai/EvidenceManager.h
     ai/EmotionAnalyzer.cpp
     ai/EmotionAnalyzer.h
     ai/TtsEngine.cpp
