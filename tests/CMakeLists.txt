@@ -10,7 +10,9 @@ find_package(Qt6 REQUIRED COMPONENTS Test Core Network Multimedia Widgets)
 set(TESTED_SOURCES
     ${CMAKE_SOURCE_DIR}/ai/VoiceVoxClient.cpp
     ${CMAKE_SOURCE_DIR}/ai/TtsEngine.cpp
+    ${CMAKE_SOURCE_DIR}/ai/DeepSeekClient.cpp
     ${CMAKE_SOURCE_DIR}/ai/PromptManager.cpp
+    ${CMAKE_SOURCE_DIR}/ai/EvidenceManager.cpp
     ${CMAKE_SOURCE_DIR}/core/WeatherManager.cpp
 )
 
@@ -18,6 +20,7 @@ set(TESTED_SOURCES
 set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/test_main.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/WeatherManagerTest.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/EvidenceManagerTest.h
     ${CMAKE_CURRENT_SOURCE_DIR}/MockServer.h
 )
 

@@ -190,6 +190,20 @@ void ChatWindow::setupUi()
     m_historyView->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_historyView->setAlignment(Qt::AlignLeft);
 
+    // ========== 临时状态文字（风格切换用，不进入聊天记录） ==========
+    m_transientStatus = new QLabel(this);
+    m_transientStatus->setAlignment(Qt::AlignCenter);
+    m_transientStatus->setWordWrap(true);
+    m_transientStatus->setStyleSheet(QStringLiteral(
+        "QLabel {"
+        "  color: #888;"
+        "  font-size: 13px;"
+        "  padding: 4px 8px;"
+        "  background: transparent;"
+        "}"
+    ));
+    m_transientStatus->setVisible(false);
+
     // ========== 输入区 ==========
     m_inputEdit = new QTextEdit(this);
     m_inputEdit->setPlaceholderText(QStringLiteral("说点什么吧... （Shift+Enter换行，Enter发送）"));
@@ -221,6 +235,7 @@ void ChatWindow::setupUi()
     mainLayout->addLayout(toolbarLayout);
     mainLayout->addWidget(m_searchBar);
     mainLayout->addWidget(m_historyView, 1);
+    mainLayout->addWidget(m_transientStatus);
     mainLayout->addLayout(inputLayout);
     setLayout(mainLayout);
 
@@ -317,6 +332,7 @@ bool ChatWindow::eventFilter(QObject *obj, QEvent *event)
             auto *keyEvent = static_cast<QKeyEvent *>(event);
             if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter) {
                 if (!(keyEvent->modifiers() & Qt::ShiftModifier)) {
+                    if (!m_inputEnabled) return true; // 输入已禁用
                     if (m_imeComposing) {
                         return false; // 输入法正在组合，Enter 用于提交候选词，不发送
                     }
@@ -398,6 +414,7 @@ void ChatWindow::adjustInputEditHeight()
 
 void ChatWindow::onSendClicked()
 {
+    if (!m_inputEnabled) return;
     const QString text = m_inputEdit->toPlainText().trimmed();
     if (text.isEmpty()) return;
 
@@ -538,6 +555,28 @@ void ChatWindow::appendSystemMessage(const QString &text)
         "<span style='color:gray; font-size:13px;'>%1</span>"
         "</div>"
     ).arg(text.toHtmlEscaped()), Qt::AlignCenter);
+}
+
+void ChatWindow::setMessageInputEnabled(bool enabled)
+{
+    m_inputEnabled = enabled;
+    m_inputEdit->setReadOnly(!enabled);
+    m_inputEdit->setPlaceholderText(enabled
+        ? QStringLiteral("说点什么吧... （Shift+Enter换行，Enter发送）")
+        : QStringLiteral("正在处理，请稍候..."));
+    m_sendButton->setEnabled(enabled);
+}
+
+void ChatWindow::showTransientStatus(const QString &text)
+{
+    m_transientStatus->setText(text);
+    m_transientStatus->setVisible(true);
+}
+
+void ChatWindow::clearTransientStatus()
+{
+    m_transientStatus->setVisible(false);
+    m_transientStatus->clear();
 }
 
 void ChatWindow::loadHistoryMessages(const QStringList &userOrAssistantRoles,

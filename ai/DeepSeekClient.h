@@ -34,8 +34,18 @@ public:
     bool setApiKeyAndPersist(const QString &apiKey);
 
     void setModel(const QString &model) { m_model = model; }
+    void setEndpoint(const QString &endpoint) { m_endpoint = endpoint; }
 
     void sendMessage(const QString &latestUserText, const QList<ChatMessage> &history);
+
+    /**
+     * @brief 发送摘要请求（非流式，stream=false）。
+     * 使用独立固定基础指令，不加载当前角色/风格，不扮演角色。
+     * 与 sendMessage 严格串行使用——App 层保证二者不同时运行。
+     * @param conversationHistory 待摘要的 user/assistant 对话历史列表
+     * @param requestId 调用方指定 ID，在 summaryReceived/summaryFailed 中原样返回
+     */
+    void sendSummaryRequest(const QList<ChatMessage> &conversationHistory, const QString &requestId);
 
 signals:
     /// 流式输出中间结果（每次收到一个 delta 片段时触发）。
@@ -45,6 +55,12 @@ signals:
     void replyReceived(const QString &reply);
 
     void errorOccurred(const QString &error);
+
+    /// 摘要请求成功返回。
+    void summaryReceived(const QString &requestId, const QString &text);
+
+    /// 摘要请求失败（网络错误、API 错误、空响应等）。
+    void summaryFailed(const QString &requestId, const QString &error);
 
 private:
     QString loadApiKeyFromFileFallback() const;

@@ -41,6 +41,13 @@ public slots:
     void loadHistoryMessages(const QStringList &userOrAssistantRoles, const QStringList &contents);
     void updateAssistantMessage(const QString &text);
     void finishAssistantMessage();
+    /// 启用/禁用消息输入控件（输入框、发送按钮、Enter 发送路径）。
+    void setMessageInputEnabled(bool enabled);
+
+    /// 显示临时状态文字（独立 QLabel，不进入聊天记录）。
+    void showTransientStatus(const QString &text);
+    /// 隐藏临时状态文字。
+    void clearTransientStatus();
 
 signals:
     void userMessageSent(const QString &text);
@@ -91,6 +98,7 @@ private:
     QString m_characterKey;                               // DB 查询用的 key（文件夹名）
     bool    m_isStreaming = false;
     bool    m_imeComposing = false;        // 输入法正在组合中
+    bool    m_inputEnabled = true;         // 输入控件是否可用
 
     MemoryDB *m_memoryDb = nullptr;
 
@@ -107,6 +115,9 @@ private:
 
     // --- 清除 ---
     QPushButton *m_clearBtn = nullptr;
+
+    // --- 临时状态文字（风格切换等不进入聊天记录的提示） ---
+    QLabel *m_transientStatus = nullptr;
 
     // --- 搜索结果 ---
     QList<MessageRecord> m_searchResults;

@@ -89,6 +89,9 @@ private slots:
 // ── Thunder From一 ──
 #include "WeatherManagerTest.h"
 
+// ── Evidence Manager MVP ──
+#include "EvidenceManagerTest.h"
+
 // ── Mock server helper ─────────────────────────────────────────────────────
 #include "MockServer.h"
 
@@ -98,6 +101,7 @@ private slots:
 #include "EdgeTtsEngineTest.cpp"
 #include "MockServerHelper.cpp"
 #include "WeatherManagerTest.cpp"
+#include "EvidenceManagerTest.cpp"
 
 // ── Main ───────────────────────────────────────────────────────────────────
 int main(int argc, char *argv[])
@@ -144,6 +148,14 @@ int main(int argc, char *argv[])
     {
         PromptManagerWeatherTest tc;
         runSuite(QStringLiteral("PromptManager-Weather"), tc);
+    }
+    {
+        PromptManagerSummaryTest tc;
+        runSuite(QStringLiteral("PromptManager-Summary"), tc);
+    }
+    {
+        EvidenceManagerTest tc;
+        runSuite(QStringLiteral("EvidenceManager"), tc);
     }
 
     qDebug() << "==========================================";

@@ -1,8 +1,12 @@
 #pragma once
 
 #include <QObject>
+#include <QString>
 #include <QList>
+#include <QTimer>
 #include <memory>
+
+#include "../ai/PromptManager.h" // for ChatMessage
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -28,6 +32,7 @@ class TrayManager;
 class ChatWindow;
 class SettingsWindow;
 class ParameterWindow;
+class EvidenceManager;
 class QFileSystemWatcher;
 
 /**
@@ -141,6 +146,7 @@ private:
     std::unique_ptr<DeepSeekClient>    m_aiClient;
     std::unique_ptr<TtsEngine>         m_ttsEngine;
     std::unique_ptr<WeatherManager>    m_weatherManager;
+    std::unique_ptr<EvidenceManager>   m_evidenceManager;
 
     std::unique_ptr<WindowManager>     m_windowManager;
     std::unique_ptr<PetWindow>         m_petWindow;
@@ -174,6 +180,20 @@ private:
     /// 回复到达时与之比较，若已变化则放弃将回复写入 API history
     /// （防止风格切换后旧请求返回污染新上下文）。
     int m_lastSentGeneration = -1;
+
+    // ──── 异步风格切换状态机 ────
+    QString m_pendingStylePrompt;                         // 最新的目标风格（归一化后）
+    int m_activeSummaryRequestId = 0;                     // 最近一次摘要请求的 ID（单调递增）
+    bool m_styleSummaryPending = false;                   // 在途聊天结束后需启动摘要
+    bool m_styleSummaryInProgress = false;                // 摘要请求已发出，等待回复
+    QList<ChatMessage> m_immutableHistorySnapshot;         // beginStyleTransition 时的快照
+    QTimer *m_summaryTimer = nullptr;                     // 15s 超时计时器
+
+    void requestStyleTransition(const QString &stylePrompt);
+    void actuallyStartSummary();
+    void finishStyleTransition();
+    QString parseSummaryJson(const QString &rawJson) const;
+    QStringList extractFallbackUserMessages(const QList<ChatMessage> &snapshot) const;
 
     // --- Edge TTS 测试语音状态 ────
     bool m_testSpeechInProgress = false;
