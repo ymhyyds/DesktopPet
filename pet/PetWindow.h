@@ -141,6 +141,10 @@ private:
     static constexpr double kPaddingRatio = 0.0;
     static constexpr int    kBaseSize    = 200;
     static constexpr int    kMinWindowSize = 20;
+    /// 极端倍率性能保护上限：最大模型缩放 400%。
+    /// 超过此倍率时 framebuffer 像素数巨大，buildAlphaRegion CPU 扫描耗时显著增加。
+    /// 此限制不代表单次 Region 构建已经彻底优化。
+    static constexpr double kMaxModelScale = 4.0;
 
     QDate m_dailyResetDate;
     bool  m_greetMorningDone = false;

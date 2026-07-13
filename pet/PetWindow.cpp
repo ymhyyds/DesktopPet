@@ -184,7 +184,7 @@ void PetWindow::applyCharacter(const CharacterConfig &config)
 
 void PetWindow::setModelScale(double scale)
 {
-    scale = qBound(0.3, scale, 10.0);
+    scale = qBound(0.3, scale, kMaxModelScale);
     m_currentModelScale = scale;
     m_live2DView->setModelScale(scale);
 
@@ -201,7 +201,7 @@ void PetWindow::computeWindowSize(double scale, double &outW, double &outH) cons
 {
     if (m_tightModelHeight <= 0.0 || m_canvasWidth <= 0.0 || m_canvasHeight <= 0.0
         || !std::isfinite(scale)) {
-        outW = outH = kBaseSize * (std::isfinite(scale) ? qBound(0.3, scale, 10.0) : 1.0);
+        outW = outH = kBaseSize * (std::isfinite(scale) ? qBound(0.3, scale, kMaxModelScale) : 1.0);
         return;
     }
 
@@ -223,7 +223,7 @@ void PetWindow::computeWindowSize(double scale, double &outW, double &outH) cons
 
     // ── 数值安全：接近零或非有限除数 → fallback ──
     if (!std::isfinite(divisor) || divisor < 1e-9) {
-        outW = outH = kBaseSize * qBound(0.3, scale, 10.0);
+        outW = outH = kBaseSize * qBound(0.3, scale, kMaxModelScale);
         return;
     }
 
@@ -772,7 +772,7 @@ void PetWindow::loadState()
     // 恢复用户上次手动调整的缩放值；首次启动 / 配置异常时 fallback 1.0
     {
         const double saved = settings.value(QStringLiteral("window/modelScale"), -1.0).toDouble();
-        m_currentModelScale = (saved > 0.0) ? qBound(0.3, saved, 10.0) : 1.0;
+        m_currentModelScale = (saved > 0.0) ? qBound(0.3, saved, kMaxModelScale) : 1.0;
     }
 
     const int affValue = settings.value(QStringLiteral("affection/value"), 0).toInt();

@@ -52,6 +52,11 @@ public:
     /// 请求延迟更新输入 mask（防抖，合并短时间内的多次请求）
     void requestInputMaskUpdate(const QString &reason, int delayMs);
 
+    /// 返回当前 update generation（仅用于日志）
+    uint64_t updateGeneration() const { return m_updateGeneration; }
+    /// 返回最后完成的 generation（仅用于日志）
+    uint64_t lastCompletedGeneration() const { return m_lastCompletedGeneration; }
+
 
 signals:
     void dragFinished();
@@ -131,13 +136,24 @@ private:
     /// 延迟调度定时器
     QTimer *m_inputMaskTimer = nullptr;
 
+    // ── Update generation 去重 ──
+    uint64_t m_updateGeneration        = 0;     ///< 当前 generation，每次 requestInputMaskUpdate 递增
+    uint64_t m_lastCompletedGeneration = 0;     ///< 最后完成完整构建的 generation
+    uint64_t m_pendingTimerGeneration  = 0;     ///< 待执行定时器所属 generation（0=无）
+    uint64_t m_alphaCapturePendingGen  = 0;     ///< 请求中的 Alpha capture generation（0=无）
+
+    // ── Alpha capture watchdog（独立于防抖 timer，处理真实捕获失败）──
+    bool     m_watchdogActive = false;        ///< watchdog 是否激活
+    uint64_t m_watchdogGeneration = 0;        ///< watchdog 所属 generation
+    qint64   m_watchdogStartTick = 0;         ///< watchdog 启动时的系统 tick (ms)
+    int      m_watchdogCheckCount = 0;        ///< watchdog 已执行的检查次数
+
+    static constexpr int kWatchdogCheckIntervalMs = 300;  ///< watchdog 检查间隔
+    static constexpr int kWatchdogMaxCheckCount = 10;      ///< 最大检查次数（~3s 超时）
+
+    void resetWatchdog();
+
     static constexpr int kDragThreshold  = 6;
-
-    // ── 诊断开关（已关闭）：裁剪时使用完整矩形 mask 代替 DeriveProxyMask ──
-    //   现在 Proxy geometry 始终等于 PetWindow，不会发生裁剪。
-    //   保留常量为 false 以便将来排查。
-    static constexpr bool kDebugUseFullRectMaskWhenClipped = false;
-
 };
 
 #include "DragAnchorHelpers.h"

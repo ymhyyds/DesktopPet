@@ -15,6 +15,7 @@
 #include <QCoreApplication>
 #include <QGuiApplication>
 #include <QDebug>
+#include <QDateTime>
 #include <QVector>
 #include <QScopedValueRollback>
 
@@ -51,6 +52,42 @@ InputProxyWindow::InputProxyWindow(PetWindow *petWindow, Live2DView *live2DView,
 
     // 初始 mask
     updateInputMask();
+
+    // ── 🔬 Phase 2: Alpha 捕获完成 → 重新构建输入 mask ──
+    //    使用 QueuedConnection 避免 paintGL 内同步调用 setMask 导致递归 repaint。
+    //    信号触发时 Alpha 缓冲区已就绪，performInputMaskUpdate 从中构建 Alpha Region 并交集。
+    //    纳入 generation 去重：仅当捕获的 generation 与当前一致且尚未完成构建才执行。
+    if (m_live2DView) {
+        connect(m_live2DView, &Live2DView::alphaCaptureReady, this, [this]() {
+            if (!m_live2DView) return;
+            const uint64_t captureGen = m_live2DView->alphaCaptureGeneration();
+
+            // ── 只接受当前 generation 的有效快照 ──
+            if (captureGen != m_updateGeneration) {
+                return;  // 旧 generation 的快照 → 丢弃
+            }
+            if (m_lastCompletedGeneration == m_updateGeneration) {
+                return;  // 该 generation 已完成 → 忽略
+            }
+            if (!m_live2DView->isAlphaCaptureValid()) {
+                return;  // 快照尺寸/DPR 不匹配 → 等待 watchdog 兜底
+            }
+
+            // ── 有效 → 取消定时器和 watchdog ──
+            m_pendingTimerGeneration = 0;
+            m_inputMaskTimer->stop();
+            m_alphaCapturePendingGen = 0;
+            m_watchdogActive = false;
+
+            // ── 发布 intersection ──
+            performInputMaskUpdate(QStringLiteral("alpha-capture"));
+
+            // ── 发布成功后标记 generation 完成 ──
+            m_lastCompletedGeneration = m_updateGeneration;
+        }, Qt::QueuedConnection);
+    }
+
+
 }
 
 InputProxyWindow::~InputProxyWindow()
@@ -124,7 +161,6 @@ bool InputProxyWindow::eventFilter(QObject *watched, QEvent *event)
     //  说明该坐标在 Drawable AABB 的透明间隙内。
     switch (event->type()) {
     case QEvent::MouseButtonPress:
-    case QEvent::MouseButtonRelease:
     case QEvent::MouseButtonDblClick:
     case QEvent::ContextMenu:
     {
@@ -138,8 +174,22 @@ bool InputProxyWindow::eventFilter(QObject *watched, QEvent *event)
         }
 
         const QPoint petLocal = m_petWindow->mapFromGlobal(globalPos);
-        if (!isInteractivePetPoint(petLocal)) {
+        const bool interactive = isInteractivePetPoint(petLocal);
+
+
+        if (!interactive) {
             // 未命中交互点 → 清理 pending 状态并阻止事件派发
+            cleanupDrag();
+            return true;
+        }
+        break;
+    }
+    case QEvent::MouseButtonRelease:
+    {
+        // Release also needs guard check, but no separate diagnostics
+        QPoint globalPos = static_cast<QMouseEvent *>(event)->globalPosition().toPoint();
+        const QPoint petLocal = m_petWindow->mapFromGlobal(globalPos);
+        if (!isInteractivePetPoint(petLocal)) {
             cleanupDrag();
             return true;
         }
@@ -195,8 +245,13 @@ void InputProxyWindow::syncGeometry()
         raise();
     }
 
-    // ── geometry 变化 → 刷新 mask ──
+    // ── geometry 变化 → 失效旧 region 并创建新 generation ──
     if (oldSize != size()) {
+        // ── 旧精确 Region 已不匹配新尺寸，立即失效 ──
+        m_preciseRegionValid = false;
+        m_preciseRegion = QRegion();
+
+        // ── 延迟精确构建（0ms 定时器，下一轮事件循环执行）──
         requestInputMaskUpdate(QStringLiteral("resize"), 0);
     }
 }
@@ -213,7 +268,79 @@ bool InputProxyWindow::ensureInputMaskTimer()
     m_inputMaskTimer->setSingleShot(true);
     connect(m_inputMaskTimer, &QTimer::timeout, this, [this]() {
         m_inputMaskUpdatePending = false;
-        performInputMaskUpdate(QStringLiteral("timer"));
+
+        const uint64_t currentGen = m_updateGeneration;
+        const uint64_t timerGen = m_pendingTimerGeneration;
+
+        // ── Generation 去重 ──
+        if (timerGen != currentGen) {
+            // 旧 generation 的定时器 → 忽略
+            return;
+        }
+        if (m_lastCompletedGeneration == currentGen) {
+            // 该 generation 已由 alphaCaptureReady 完成构建 → 忽略
+            return;
+        }
+
+        // 检查 Alpha capture 是否已就绪（属于当前 generation）
+        const bool alphaReady = m_live2DView
+            && m_live2DView->isAlphaCaptureValid()
+            && m_live2DView->alphaCaptureGeneration() == currentGen;
+
+        if (alphaReady) {
+            // ── Alpha 就绪 → 发布 intersection，标记 generation 完成 ──
+            m_pendingTimerGeneration = 0;
+            m_watchdogActive = false;
+            performInputMaskUpdate(QStringLiteral("timer"));
+            m_lastCompletedGeneration = currentGen;
+            return;
+        }
+
+        // ════════════════════════════════════════════════════════════════
+        //  Alpha 尚未就绪 → 区分"捕获仍在重试"和"已明确失败"
+        // ════════════════════════════════════════════════════════════════
+        //  不发布 geometric-only，不标记 generation 完成。
+        //  保持当前已有 Mask，等待 alphaCaptureReady 到达。
+        //  使用有限 watchdog 处理真正的捕获失败。
+        // ════════════════════════════════════════════════════════════════
+        const bool capturePending = m_live2DView && m_live2DView->alphaCapturePending();
+
+        if (capturePending) {
+            // ── 捕获仍在重试 → 启动/继续 watchdog ──
+            if (m_watchdogActive && m_watchdogGeneration == currentGen) {
+                // Watchdog 已激活 → 检查是否超时
+                m_watchdogCheckCount++;
+                if (m_watchdogCheckCount >= kWatchdogMaxCheckCount) {
+                    // Watchdog 超时 → 兜底 geometric-only fallback
+                    m_pendingTimerGeneration = 0;
+                    m_watchdogActive = false;
+                    performInputMaskUpdate(QStringLiteral("watchdog-fallback"));
+                    m_lastCompletedGeneration = currentGen;
+                    return;
+                }
+                // 继续等待
+                m_pendingTimerGeneration = currentGen;
+                m_inputMaskTimer->start(kWatchdogCheckIntervalMs);
+            } else {
+                // 首次遇到 Alpha 未就绪 → 启动 watchdog
+                m_watchdogActive = true;
+                m_watchdogGeneration = currentGen;
+                m_watchdogStartTick = QDateTime::currentMSecsSinceEpoch();
+                m_watchdogCheckCount = 1;
+                m_pendingTimerGeneration = currentGen;
+                m_inputMaskTimer->start(kWatchdogCheckIntervalMs);
+            }
+        } else {
+            // ── 捕获已明确失败（重试耗尽或无可用的 pending 请求）──
+            //  不等待 watchdog 超时，立即 geometric-only fallback。
+            //  对应场景：glReadPixels 连续失败超过 kAlphaCaptureMaxRetries，
+            //  或 requestAlphaCapture 被 m_glReady=false 屏蔽后恢复失败。
+            m_pendingTimerGeneration = 0;
+            m_watchdogActive = false;
+            performInputMaskUpdate(QStringLiteral("capture-failed"));
+            m_lastCompletedGeneration = currentGen;
+            return;
+        }
     });
     return true;
 }
@@ -223,7 +350,52 @@ void InputProxyWindow::requestInputMaskUpdate(const QString &reason, int delayMs
     if (!ensureInputMaskTimer())
         return;
 
+    // ── Generation 去重与合并 ──
+    //  缩放相关请求 (resize, scale) 在定时器活跃时合并到同一 generation。
+    //  不活跃时每个原因产生独立 generation。
+    static const QStringList mergeableReasons {
+        QStringLiteral("resize"),
+        QStringLiteral("scale"),
+        QStringLiteral("stable-bounds"),
+        QStringLiteral("model-loaded"),
+    };
+
+    const bool isMergeable = mergeableReasons.contains(reason);
+    const bool timerActive = m_pendingTimerGeneration > 0;
+
+    if (isMergeable && timerActive && m_lastCompletedGeneration < m_updateGeneration) {
+        // ── 合并到当前 pending generation ──
+        //  不递增 generation，仅重启定时器并确保 Alpha capture 已请求。
+        if (m_live2DView && !m_live2DView->isAlphaCaptureValid()) {
+            m_alphaCapturePendingGen = m_updateGeneration;
+            m_live2DView->requestAlphaCapture(m_updateGeneration);
+            // Alpha 被外部（resizeGL/模型切换）失效，重新请求捕获 → 重置 watchdog
+            resetWatchdog();
+        }
+        m_pendingTimerGeneration = m_updateGeneration;
+        m_inputMaskTimer->start(delayMs);
+        return;
+    }
+
+    // ── 新 generation ──
+    m_updateGeneration++;
+    m_lastCompletedGeneration = 0;   // 新 generation 尚未完成
     m_inputMaskUpdatePending = true;
+
+    // ── 清零旧 generation 的残留状态 ──
+    m_pendingTimerGeneration = 0;
+    m_alphaCapturePendingGen = 0;
+    resetWatchdog();
+
+    // ★ 新 generation 始终请求该 generation 的 Alpha 捕获。
+    //   旧快照即使尺寸匹配也不代表当前模型状态/动画内容。
+    //   requestAlphaCapture 内部有同 gen 去重，不会重复排队。
+    m_alphaCapturePendingGen = m_updateGeneration;
+    if (m_live2DView) {
+        m_live2DView->requestAlphaCapture(m_updateGeneration);
+    }
+
+    m_pendingTimerGeneration = m_updateGeneration;
     m_inputMaskTimer->start(delayMs);
 }
 
@@ -239,13 +411,34 @@ void InputProxyWindow::performInputMaskUpdate(const QString &reason)
         return;
     }
 
-    // ── 构建精确 candidate region（PetWindow-local 坐标） ──
+    // ── 构建精确 geometric region（PetWindow-local 坐标） ──
     const QRegion candidatePrecise = m_live2DView->buildPreciseInputRegion(m_inputMaskCellSize);
+
+    // ── 构建 Alpha Region 并取交集 ──
+    QRegion alphaRegion;
+    QRegion finalRegion;
+
+    if (m_live2DView->isAlphaCaptureValid()) {
+        alphaRegion = m_live2DView->buildAlphaRegion(m_inputMaskCellSize);
+
+        if (!alphaRegion.isEmpty() && !candidatePrecise.isEmpty()) {
+            // finalRegion = geometricRegion & alphaRegion（几何区域内的 Alpha 透明区被排除）
+            finalRegion = candidatePrecise & alphaRegion;
+        } else if (!candidatePrecise.isEmpty()) {
+            finalRegion = candidatePrecise;
+        }
+    } else {
+        finalRegion = candidatePrecise;
+    }
+
+    if (finalRegion.isEmpty()) {
+        return;
+    }
 
     // ── 坐标转换：PetWindow-local → Proxy-local ──
     const QRect petGeo = m_petWindow->geometry();
     const QRect actualProxyGeo = geometry();
-    const QRegion candidate = DeriveProxyMask(candidatePrecise, petGeo, actualProxyGeo);
+    const QRegion candidate = DeriveProxyMask(finalRegion, petGeo, actualProxyGeo);
 
     const QSize currentProxySize = actualProxyGeo.size();
 
@@ -261,7 +454,7 @@ void InputProxyWindow::performInputMaskUpdate(const QString &reason)
         return;
     }
 
-    // 情况 3：trusted region → 发布
+    // ── 发布 ──
     publishInputRegion(candidate, reason);
 }
 
@@ -287,19 +480,9 @@ void InputProxyWindow::publishInputRegion(const QRegion &region, const QString &
         return;
     }
 
-    // ── 全窗口 → clearMask ──
-    // 理论上精确 grid 不会产生全窗口结果，但保留防御性检查
-    if (region == QRegion(QRect(QPoint(0, 0), currentSize))) {
-        if (m_preciseRegionValid) {
-            clearMask();
-        }
-        m_preciseRegionValid = false;
-        m_preciseRegion = QRegion();
-        // 不覆盖 last good（clearMask 是临时状态）
-        return;
-    }
-
     // ── 应用 OS mask ──
+    //  不使用 clearMask：clearMask 完全移除 OS 级别裁剪，缩放期间旧 Mask
+    //  不匹配新窗口尺寸时整个窗口无保护。setMask(newRegion) 原子替换。
     setMask(region);
     m_preciseRegion = region;
     m_preciseRegionValid = true;
@@ -400,8 +583,8 @@ void InputProxyWindow::mouseReleaseEvent(QMouseEvent *event)
     if (event->button() == Qt::LeftButton && m_dragging) {
         cleanupDrag();
         syncGeometry();
-        // 拖拽释放后请求重新构建 mask（滞后，不阻塞 release）
-        requestInputMaskUpdate(QStringLiteral("drag-release"), 50);
+        // ★ 拖动释放不重建 Mask：窗口仅移动，局部轮廓不变，
+        //    原 Mask 随窗口自动移动，无需重新构建。
         emit dragFinished();
         return;
     }
@@ -576,4 +759,16 @@ void InputProxyWindow::paintEvent(QPaintEvent *event)
         painter.setClipRegion(m_preciseRegion);
         painter.fillRect(rect(), QColor(0, 0, 0, 1));
     }
+}
+
+// ============================================================================
+// 🔬 Phase 2: Alpha Capture Watchdog
+// ============================================================================
+
+void InputProxyWindow::resetWatchdog()
+{
+    m_watchdogActive = false;
+    m_watchdogGeneration = 0;
+    m_watchdogStartTick = 0;
+    m_watchdogCheckCount = 0;
 }
