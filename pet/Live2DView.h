@@ -90,7 +90,6 @@ public:
     /// @return 精确的 QRegion，模型未加载 / 无 drawable / 无有效几何时返回空 QRegion
     QRegion buildPreciseInputRegion(int cellSizePx = 2) const;
 
-
     /// 返回当前加载的模型目录名（最后一级路径）
     QString modelName() const;
 
@@ -219,4 +218,56 @@ private:
 
     // ── TTS 嘴型同步状态 ──
     bool m_isSpeaking = false;
+
+    // ══════════════════════════════════════════════════════════════════
+    //  🔬 Phase 2: Alpha Region 整帧捕获（public API）
+    // ══════════════════════════════════════════════════════════════════
+
+public:
+    /// 请求在下一次 paintGL 中捕获帧缓冲 Alpha
+    /// @param generation 当前 update generation，捕获后记录以便回调方判断是否仍有效
+    void requestAlphaCapture(uint64_t generation = 0);
+
+    /// 当前有效 Alpha 快照对应的 generation
+    uint64_t alphaCaptureGeneration() const { return m_alphaCaptureGen; }
+
+    /// 从最近捕获的 Alpha 缓冲区构建 QRegion（2×2 cell 扫描）
+    QRegion buildAlphaRegion(int cellSizePx = 2) const;
+
+    /// Alpha 快照是否有效且匹配当前 widget 尺寸
+    bool isAlphaCaptureValid() const;
+
+    /// 当前是否有未完成的 Alpha 捕获请求（等待 paintGL 执行 glReadPixels）
+    bool alphaCapturePending() const { return m_pendingAlphaCapture; }
+
+    /// 当前 generation 的捕获重试次数
+    int alphaCaptureRetryCount() const { return m_alphaCaptureRetryCount; }
+
+    /// 使当前 Alpha 快照失效（模型切换 / GL 重建时）
+    void invalidateAlphaCapture();
+
+signals:
+    /// Alpha 帧缓冲捕获完成（QueuedConnection，不递归触发 repaint）
+    void alphaCaptureReady();
+
+private:
+    /// 在 paintGL 中执行整帧 glReadPixels 并保存 Alpha 通道
+    void captureFramebufferAlpha();
+
+    // ── Alpha capture state ──
+    bool    m_pendingAlphaCapture   = false;
+    uint64_t m_alphaCaptureRequestGen = 0;  ///< 请求 capture 时的 generation
+    int     m_alphaCaptureRetryCount = 0;   ///< 当前 generation 的捕获重试次数
+    static constexpr int kAlphaCaptureMaxRetries = 3; ///< glReadPixels 最大重试次数
+    QVector<unsigned char> m_alphaBuffer;   ///< 仅 Alpha 通道，行优先，Y-flip 已处理
+    int     m_alphaCaptureW         = 0;    ///< fb 像素宽度
+    int     m_alphaCaptureH         = 0;    ///< fb 像素高度
+    int     m_alphaCaptureWidgetW   = 0;    ///< widget 逻辑宽度
+    int     m_alphaCaptureWidgetH   = 0;    ///< widget 逻辑高度
+    double  m_alphaCaptureDPR       = 1.0;  ///< 捕获时的 devicePixelRatio
+    int     m_frameSequence         = 0;    ///< paintGL 帧序号（单调递增）
+
+    int     m_alphaCaptureFrameSeq  = 0;    ///< 捕获时的帧序号
+    bool    m_alphaCaptureValid     = false;
+    uint64_t m_alphaCaptureGen      = 0;     ///< 当前快照所属的 generation
 };

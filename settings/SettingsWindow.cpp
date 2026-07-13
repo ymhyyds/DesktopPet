@@ -51,7 +51,7 @@ void SettingsWindow::setupUi()
     auto *appearanceLayout = new QVBoxLayout(appearanceGroup);
     auto *sizeRow = new QHBoxLayout();
     m_sizeSlider = new QSlider(Qt::Horizontal, this);
-    m_sizeSlider->setRange(30, 1000);
+    m_sizeSlider->setRange(30, 400);      // 30%~400%（值/100=倍率），上限受 PetWindow::kMaxModelScale=4.0 约束
     m_sizeSlider->setValue(100);
     m_sizeLabel = new QLabel(QStringLiteral("100%"), this);
     m_sizeLabel->setFixedWidth(44);
@@ -607,7 +607,7 @@ void SettingsWindow::setIdleTimeoutMinutes(int minutes)
 
 void SettingsWindow::setModelScale(double scale)
 {
-    const int percent = qBound(30, qRound(scale * 100.0), 1000);
+    const int percent = qBound(30, qRound(scale * 100.0), 400);
     m_sizeSlider->setValue(percent);
     m_sizeLabel->setText(QStringLiteral("%1%").arg(percent));
 }

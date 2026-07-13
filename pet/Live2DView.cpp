@@ -529,6 +529,9 @@ void Live2DView::loadPendingModelIfNeeded()
                       .arg(minX, 0, 'f', 4).arg(minY, 0, 'f', 4));
         }
     });
+
+    // ★ 新模型 → 旧 Alpha 快照失效（渲染内容已变）
+    invalidateAlphaCapture();
 }
 
 // ============================================================================
@@ -619,6 +622,9 @@ void Live2DView::resizeGL(int w, int h)
     }
     // （IsBlendModeEnabled=0 已确认，SetRenderTargetSize 是空操作，移除调用）
 
+    // ★ Alpha 快照尺寸不再匹配 → 失效
+    invalidateAlphaCapture();
+
     // 记录 GLFW 窗口实际尺寸（用于排查渲染不一致）
     if (m_hiddenGlfwWindow) {
         int actualGlfwW, actualGlfwH;
@@ -636,6 +642,7 @@ void Live2DView::resizeGL(int w, int h)
 
 void Live2DView::paintGL()
 {
+    ++m_frameSequence;
     QPainter painter(this);
     painter.beginNativePainting();
     {
@@ -682,6 +689,13 @@ void Live2DView::paintGL()
         }
     }
     painter.endNativePainting();
+
+    // ── 🔬 Phase 2: Alpha Frame Capture ──
+    // 在 paintGL 末尾执行 glReadPixels（此时 context 为 current，FBO 含最终渲染结果）。
+    // 不在此处调用 setMask 或 emit 信号同步连接，避免递归触发 repaint。
+    if (m_pendingAlphaCapture) {
+        captureFramebufferAlpha();
+    }
 
     // 模型正常 → 不画覆盖层；只有加载失败时才显示错误信息
     if (m_modelLoadFailed) {
@@ -1626,10 +1640,258 @@ QRegion Live2DView::buildPreciseInputRegion(int cellSizePx) const
 
     }
 
-    if (hitCells.isEmpty())
+    if (hitCells.isEmpty()) {
+        return QRegion();
+    }
+
+    const QRegion result = InputRegionBuilder::mergeCellRects(hitCells, cellSizePx, width(), height());
+    return result;
+}
+
+// ============================================================================
+// 🔬 Phase 2: Alpha Region — 整帧 Alpha 捕获与 Region 构建
+// ============================================================================
+
+void Live2DView::invalidateAlphaCapture()
+{
+    m_alphaCaptureValid = false;
+    m_alphaBuffer.clear();
+    // ★ 不重置 m_pendingAlphaCapture：
+    //   resizeGL 等场景中即使尺寸变化，捕获请求仍在当前 generation 有效，
+    //   下一次 paintGL 应以新尺寸执行捕获。
+    //   若清除此标志，则 paintGL → captureFramebufferAlpha 立即返回，
+    //   导致 Alpha 捕获被跳过 → 无 alphaCaptureReady 信号 → 等待 3s → watchdog fallback。
+    // m_pendingAlphaCapture = false;
+}
+
+void Live2DView::requestAlphaCapture(uint64_t generation)
+{
+    // 同 generation 已存在 pending 请求时不重复排队（避免无限 update/paintGL 循环）
+    if (m_pendingAlphaCapture && m_alphaCaptureRequestGen == generation)
+        return;
+
+    m_alphaCaptureRequestGen = generation;
+    m_alphaCaptureRetryCount = 0;  // 新 generation 重置重试计数
+    if (!m_model || !m_glReady) {
+        // GL 尚未就绪（show() 前调用）→ 保持 pending 标记，
+        // 使 initializeGL → 首次 paintGL 时执行捕获。
+        // ★ 不重置 m_pendingAlphaCapture，否则请求被静默丢弃，
+        //   无 alphaCaptureReady → watchdog 3s 超时 → geometric-only fallback。
+        m_pendingAlphaCapture = true;
+        return;
+    }
+    if (!m_pendingAlphaCapture) {
+        m_pendingAlphaCapture = true;
+        update();  // 请求下一次 paintGL
+    }
+}
+
+void Live2DView::captureFramebufferAlpha()
+{
+    if (!m_pendingAlphaCapture)
+        return;
+    m_pendingAlphaCapture = false;
+
+    const int w = width();
+    const int h = height();
+    if (w <= 0 || h <= 0)
+        return;
+
+    const qreal dpr = devicePixelRatio();
+    const int fbW = qRound(w * dpr);
+    const int fbH = qRound(h * dpr);
+    if (fbW <= 0 || fbH <= 0)
+        return;
+
+    // ── glReadPixels 整帧 RGBA ──
+
+    // 此时 context 应为 current（paintGL 调用链）
+    // 分配临时 RGBA 缓冲区用于 glReadPixels
+    const int pixelCount = fbW * fbH;
+    QVector<unsigned char> rgba(pixelCount * 4);
+
+    // 确保 READ_FRAMEBUFFER 绑定正确
+    GLint prevReadFbo = 0;
+    glGetIntegerv(GL_READ_FRAMEBUFFER_BINDING, &prevReadFbo);
+
+    glReadPixels(0, 0, fbW, fbH, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+
+    GLenum err = glGetError();
+    if (err != GL_NO_ERROR) {
+        // ── glReadPixels 失败 → 有限重试 ──
+        // 不发出 alphaCaptureReady，保留 pending 使 paintGL 重试。
+        // 超过最大重试次数后停止，让 watchdog 兜底 geometric-only fallback。
+        m_alphaCaptureValid = false;
+        m_alphaBuffer.clear();
+
+        m_alphaCaptureRetryCount++;
+        if (m_alphaCaptureRetryCount < kAlphaCaptureMaxRetries) {
+            // 保留 pending 使下一帧 paintGL 重试
+            m_pendingAlphaCapture = true;
+            // 不发出 alphaCaptureReady（无有效数据，让 timer/watchdog 继续等待）
+        }
+        // 超过重试上限：m_pendingAlphaCapture 保持 false（已在函数入口清除），
+        // 无 alphaCaptureReady 信号发出，timer 会在下一次到期时走 capture-failed 路径。
+        return;
+    }
+
+    // ── 提取 Alpha 通道 ──
+    m_alphaBuffer.resize(pixelCount);
+    for (int i = 0; i < pixelCount; ++i)
+        m_alphaBuffer[i] = rgba[i * 4 + 3];
+
+    // ── 记录捕获元数据 ──
+    m_alphaCaptureGen = m_alphaCaptureRequestGen;  // 标记快照所属 generation
+    m_alphaCaptureW  = fbW;
+    m_alphaCaptureH  = fbH;
+    m_alphaCaptureWidgetW = w;
+    m_alphaCaptureWidgetH = h;
+    m_alphaCaptureDPR = dpr;
+    m_alphaCaptureFrameSeq = m_frameSequence;
+    m_alphaCaptureValid = true;
+    m_alphaCaptureRetryCount = 0;  // 捕获成功 → 重试计数清零
+
+    // ── 通过 QueuedConnection 通知 InputProxyWindow 构建 Alpha Region ──
+    // paintGL 内不调用 setMask，不 emit 同步信号，防止递归触发 repaint
+    QMetaObject::invokeMethod(this, "alphaCaptureReady", Qt::QueuedConnection);
+}
+
+QRegion Live2DView::buildAlphaRegion(int cellSizePx) const
+{
+    if (!m_alphaCaptureValid || m_alphaBuffer.isEmpty())
         return QRegion();
 
-    return InputRegionBuilder::mergeCellRects(hitCells, cellSizePx, width(), height());
+    const int w = width();
+    const int h = height();
+    if (w <= 0 || h <= 0)
+        return QRegion();
+
+    const qreal dpr = devicePixelRatio();
+
+    // ── 一致性检查：快照必须匹配当前尺寸 ──
+    if (m_alphaCaptureWidgetW != w || m_alphaCaptureWidgetH != h ||
+        qAbs(m_alphaCaptureDPR - dpr) > 0.001 ||
+        m_alphaCaptureW != qRound(w * dpr) ||
+        m_alphaCaptureH != qRound(h * dpr))
+    {
+        return QRegion();
+    }
+
+    const int fbW = m_alphaCaptureW;
+    const int fbH = m_alphaCaptureH;
+
+    // ════════════════════════════════════════════════════════════════
+    //  Phase 1: framebuffer Alpha 像素扫描 + cell 可见性生成
+    // ════════════════════════════════════════════════════════════════
+
+    const int cols = (w + cellSizePx - 1) / cellSizePx;
+    const int rows = (h + cellSizePx - 1) / cellSizePx;
+
+    QVector<QPair<int,int>> alphaCells;
+
+    for (int r = 0; r < rows; ++r) {
+        const int cellT = r * cellSizePx;
+        const int cellB = qMin((r + 1) * cellSizePx, h);
+
+        for (int c = 0; c < cols; ++c) {
+            const int cellL = c * cellSizePx;
+            const int cellR = qMin((c + 1) * cellSizePx, w);
+
+            // cell → framebuffer 物理像素范围
+            const int fbL = qMax(0, qRound(cellL * dpr));
+            const int fbT = qMax(0, qRound(cellT * dpr));
+            const int fbR = qMin(fbW, qRound(cellR * dpr));
+            const int fbB = qMin(fbH, qRound(cellB * dpr));
+
+            if (fbR <= fbL || fbB <= fbT)
+                continue;
+
+            bool hasAlpha = false;
+
+            // 扫描 cell 内所有物理像素
+            for (int py = fbT; py < fbB; ++py) {
+                const int bufRow = fbH - 1 - py;
+                const int rowOffset = bufRow * fbW;
+
+                for (int px = fbL; px < fbR; ++px) {
+                    if (px < 0 || px >= fbW)
+                        continue;
+
+                    if (m_alphaBuffer[rowOffset + px] >= 30) {
+                        hasAlpha = true;
+                        break;
+                    }
+                }
+                if (hasAlpha)
+                    break;
+            }
+
+            if (hasAlpha)
+                alphaCells.append(qMakePair(c, r));
+        }
+    }
+
+    if (alphaCells.isEmpty())
+        return QRegion();
+
+    std::sort(alphaCells.begin(), alphaCells.end());
+    alphaCells.erase(std::unique(alphaCells.begin(), alphaCells.end()), alphaCells.end());
+
+    QRegion result;
+    const int rowCount = alphaCells.size();
+    int idx = 0;
+
+    while (idx < rowCount) {
+        const int row = alphaCells[idx].second;
+
+        int spanStart = alphaCells[idx].first;
+        int spanEnd = spanStart + 1;
+        ++idx;
+
+        // 同一行中合并连续 col
+        while (idx < rowCount && alphaCells[idx].second == row) {
+            if (alphaCells[idx].first == spanEnd) {
+                spanEnd = alphaCells[idx].first + 1;
+                ++idx;
+            } else {
+                break;
+            }
+        }
+
+        // 收集矩形，等 Phase 4 统一构造
+        int rx = spanStart * cellSizePx;
+        int rw = (spanEnd - spanStart) * cellSizePx;
+        int ry = row * cellSizePx;
+        int rh = cellSizePx;
+
+        if (rx < 0) { rw += rx; rx = 0; }
+        if (ry < 0) { rh += ry; ry = 0; }
+        if (rx < w && ry < h) {
+            rw = std::min(rw, w - rx);
+            rh = std::min(rh, h - ry);
+            if (rw > 0 && rh > 0)
+                result |= QRegion(rx, ry, rw, rh);
+        }
+    }
+
+    return result;
+}
+
+bool Live2DView::isAlphaCaptureValid() const
+{
+    if (!m_alphaCaptureValid || m_alphaBuffer.isEmpty())
+        return false;
+
+    const int w = width();
+    const int h = height();
+    if (w <= 0 || h <= 0)
+        return false;
+
+    const qreal dpr = devicePixelRatio();
+    return m_alphaCaptureWidgetW == w && m_alphaCaptureWidgetH == h &&
+           qAbs(m_alphaCaptureDPR - dpr) < 0.001 &&
+           m_alphaCaptureW == qRound(w * dpr) &&
+           m_alphaCaptureH == qRound(h * dpr);
 }
 
 
