@@ -2,6 +2,9 @@
 
 #include <functional>
 #include <map>
+#include <set>
+#include <string>
+#include <vector>
 #include <QString>
 #include <QVector>
 
@@ -10,6 +13,7 @@
 
 #include "LAppTextureManager.hpp"
 #include "LAppModel_Common.hpp"
+#include "MotionLifecycleCore.hpp"
 #include "PetAnimationState.h"
 #include "LipSyncEnvelope.h"
 #include "LipSyncConfig.h"
@@ -282,10 +286,7 @@ private:
     /// 从 _expressions 映射重建 m_expressionNames（排除加载失败的空指针条目）
     void rebuildExpressionList();
 
-    // Idle 循环控制：主动交叉淡入淡出替代 SDK 时间回绕
-    float m_idleDuration = 0.0f;            // Idle 动画总时长（秒），取自 motion3.json
-    float m_lastIdleRestartTime = 0.0f;     // 上次启动 Idle 的时间点（_userTimeSeconds）
-    bool  m_inProactiveIdleLoop = false;    // true=正在 Idle 循环中，false=被 Tap 等打断
+    // 第一版移除了 proactive 循环，无 idle 定时逻辑
 
     // ====================================================================
     // 🗣️ 嘴型同步（LipSync）相关
@@ -329,6 +330,43 @@ private:
 
     /// 实际模型参数索引映射 { CubismIdHandle → index }，加载时枚举建立
     QHash<const void*, int> m_actualParameterMap;
+
+    // ====================================================================
+    // 🎬 Motion Parameter Lifecycle — 通用参数恢复系统
+    // ====================================================================
+
+    /// 运动参数索引缓存（key = "Group_Index"，如 "Idle_0"）
+    /// 非插入式查询：使用 find() 而非 operator[]
+    MotionLifecycle::ParameterCache m_motionParameterCache;
+
+    /// 当前活跃运动参数状态（见 MotionLifecycleCore.hpp）
+    MotionLifecycle::ActiveMotionState<Csm::CubismMotionQueueEntryHandle> m_activeMotionState;
+
+    /// 待恢复参数链（按 outgoing handle 管理，见 MotionLifecycleCore.hpp）
+    MotionLifecycle::PendingRestoreChain<Csm::CubismMotionQueueEntryHandle> m_pendingRestoreChain;
+
+    /// 模型生成代数（SetupModel 时递增，使旧 pending 失效）
+    int m_modelGeneration = 0;
+
+    /// 上次 Idle 动作索引（避免连续重复）
+    int m_lastIdleIndex = -1;
+
+    /// 每帧恢复所有 pending entries 的参数值
+    void applyPendingRestores();
+
+    /// 模型切换时清除全部 motion 状态（cache / active / pending / generation）
+    void clearMotionState();
+
+    /// 随机选择 Idle 动作索引（避免连续重复，委托至 MotionLifecycleCore）
+    static int selectIdleIndex(int count, int lastIndex);
+
+    /// 启动动作并管理参数生命周期（替代原始 StartMotion 的入口）
+    Csm::CubismMotionQueueEntryHandle beginMotionTransition(
+        const Csm::csmChar* group, Csm::csmInt32 no, Csm::csmInt32 priority);
+
+    /// 随机启动一个 Idle 动作（含选择 + 生命周期）
+    Csm::CubismMotionQueueEntryHandle startRandomIdleMotion();
+
 public:
     // ====================================================================
     // 🎯 命中检测区域 — model3.json HitAreas / drawable 名称匹配

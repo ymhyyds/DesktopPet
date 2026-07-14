@@ -330,3 +330,31 @@ add_test(NAME test_emotion_parameters
     COMMAND test_emotion_parameters
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# ── Motion Parameter Lifecycle Unit Tests ──────────────────────────────
+# Pure logic tests for: entryBaseline inheritance, pending restore chain,
+# conflict resolution, outgoing-only calculation, generation invalidation,
+# natural end cleanup, StartMotion failure rollback, Idle selection.
+# No Cubism SDK, no OpenGL, no Qt Multimedia, no mock server.
+
+add_executable(test_motion_lifecycle
+    ${CMAKE_CURRENT_SOURCE_DIR}/MotionLifecycleTest.cpp
+)
+
+set_target_properties(test_motion_lifecycle PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_motion_lifecycle PRIVATE
+    ${CMAKE_SOURCE_DIR}
+)
+
+target_link_libraries(test_motion_lifecycle PRIVATE
+    Qt6::Test
+    Qt6::Core
+)
+
+add_test(NAME test_motion_lifecycle
+    COMMAND test_motion_lifecycle
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
