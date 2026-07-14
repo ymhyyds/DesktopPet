@@ -10,6 +10,7 @@
 #include <Rendering/OpenGL/CubismRenderer_OpenGLES2.hpp>
 #include <Rendering/OpenGL/CubismOffscreenManager_OpenGLES2.hpp>
 #include <Motion/CubismMotionQueueEntry.hpp>
+#include <Motion/CubismMotionJson.hpp>
 #include <Id/CubismIdManager.hpp>
 
 #include "LAppPal.hpp"
@@ -213,6 +214,9 @@ void ModelController::SetupModel(csmUint32 width, csmUint32 height)
 
     _model->SaveParameters();
 
+    // ★ 清除上一模型的 motion 状态（必须在 PreloadMotionGroup 之前）
+    clearMotionState();
+
     // 预加载蒙层
     for (csmInt32 i = 0; i < _modelJson->GetMotionGroupCount(); i++)
     {
@@ -221,6 +225,9 @@ void ModelController::SetupModel(csmUint32 width, csmUint32 height)
     }
 
     _motionManager->StopAllMotions();
+
+    // ★ 重置 Idle 状态
+    m_lastIdleIndex = -1;
 
     // 创建渲染器
     CreateRenderer(width, height);
@@ -271,13 +278,28 @@ void ModelController::PreloadMotionGroup(const csmChar* group)
                 tmpMotion->SetLoop(false);
             } else {
                 // ★ 不自带 SDK 循环（SDK 时间回绕在 time==endTime 时参数瞬跳），
-                //   改用主动交叉淡入淡出闭环（ModelParamUpdate 中结束前 0.5s 用 PriorityForce 预启动）
+                //   改用 IsFinished 路径自然淡入淡出
                 tmpMotion->SetLoop(false);
                 tmpMotion->SetFadeInTime(0.5f);   // 淡入 0.5 秒
-                tmpMotion->SetFadeOutTime(0.5f);  // 淡出 0.5 秒（被 Tap 中断或主动重启时平滑过渡）
-                m_idleDuration = tmpMotion->GetDuration();  // 保存实际时长用于预重启判断
+                tmpMotion->SetFadeOutTime(0.5f);  // 淡出 0.5 秒（被 Tap 中断时平滑过渡）
             }
             _motions[name] = tmpMotion;
+        }
+
+        // ★ 缓存此 Motion 驱动的参数索引（非插入式查询，缓存缺失不影响功能）
+        {
+            CubismMotionJson json(buffer, size);
+            std::set<int> paramIndices;
+            for (int c = 0; c < json.GetMotionCurveCount(); c++) {
+                if (strcmp(json.GetMotionCurveTarget(c), "Parameter") != 0)
+                    continue;
+                CubismIdHandle id = json.GetMotionCurveId(c);
+                if (!id) continue;
+                int idx = _model->GetParameterIndex(id);
+                if (idx >= 0)
+                    paramIndices.insert(idx);
+            }
+            m_motionParameterCache[name.GetRawString()] = std::move(paramIndices);
         }
 
         DeleteBuffer(buffer, path.GetRawString());
@@ -356,6 +378,22 @@ void ModelController::loadAutoTapMotions()
         {
             LAppPal::PrintMessage(("[ModelController] 自动注册动作失败: "
                                    + file.toStdString() + "\n").c_str());
+        }
+
+        // ★ 缓存自动动作的参数索引
+        {
+            CubismMotionJson json(buffer, size);
+            std::set<int> paramIndices;
+            for (int c = 0; c < json.GetMotionCurveCount(); c++) {
+                if (strcmp(json.GetMotionCurveTarget(c), "Parameter") != 0)
+                    continue;
+                CubismIdHandle id = json.GetMotionCurveId(c);
+                if (!id) continue;
+                int idx = _model->GetParameterIndex(id);
+                if (idx >= 0)
+                    paramIndices.insert(idx);
+            }
+            m_motionParameterCache[name.GetRawString()] = std::move(paramIndices);
         }
 
         CSM_FREE(buffer);
@@ -821,31 +859,26 @@ void ModelController::ModelParamUpdate()
     {
         // 只有当确实没任何动作在播时才重启 Idle（GetCurrentPriority==0 兜底保护）
         if (_motionManager->GetCurrentPriority() == 0) {
-            StartMotion(LAppDefine::MotionGroupIdle, 0, LAppDefine::PriorityIdle);
-            m_lastIdleRestartTime = _userTimeSeconds;
-            m_inProactiveIdleLoop = true;
+            // ★ 使用 Idle 选择 + 生命周期管理启动下一个 Idle
+            auto handle = startRandomIdleMotion();
+            if (handle == Csm::InvalidMotionQueueEntryHandleValue) {
+                // 自然结束，无下一动作 → 恢复 active entry baselines（不 clear pending chain）
+                MotionLifecycle::handleNaturalEnd(
+                    m_activeMotionState,
+                    m_modelGeneration,
+                    [this](MotionLifecycle::ParamIndex idx, float val) {
+                        _model->SetParameterValue(static_cast<Csm::csmInt32>(idx), val);
+                    });
+            }
         }
     }
     else
     {
         _motionUpdated = _motionManager->UpdateMotion(_model, deltaTimeSeconds);
-
-        // ★ 主动交叉淡入淡出闭环
-        //    在 Idle 结束前 ~0.5s 用 PriorityForce 预启动下一个 Idle，
-        //    SDK 自动处理旧→新的淡出/淡入，避免 IsFinished → StartMotion 之间的参数跳变
-        //    仅当确实在 Idle 循环中时（非 Tap 播放中）才触发
-        if (m_inProactiveIdleLoop && m_idleDuration > 0.0f)
-        {
-            const float elapsed = _userTimeSeconds - m_lastIdleRestartTime;
-            const float restartLead = 0.5f;  // 提前 0.5 秒开始交叉过渡
-            if (elapsed >= m_idleDuration - restartLead) {
-                StartMotion(LAppDefine::MotionGroupIdle, 0, LAppDefine::PriorityForce);
-                m_lastIdleRestartTime = _userTimeSeconds;
-                // Tap 播放中时 m_inProactiveIdleLoop 为 false，因此不会误进入此处
-                m_inProactiveIdleLoop = true;
-            }
-        }
     }
+
+    // ★ ★ 参数恢复：将已退出的 Motion 驱动的参数恢复为 entry baseline
+    applyPendingRestores();
 
     // ★ 第 1 遍：头部追踪 + 情绪先施加
     //    这样 Physics / Pose / Look 在 OnLateUpdate 中能感知到转头角度
@@ -1126,8 +1159,7 @@ Csm::CubismMotionQueueEntryHandle ModelController::startRandomTapMotion()
         return Csm::InvalidMotionQueueEntryHandleValue;
     }
 
-    // 退出主动 Idle 循环，防止 ModelParamUpdate 中误触发 Idle 预重启打断 Tap
-    m_inProactiveIdleLoop = false;
+    // ★ startRandomTapMotion 不再需要退出 Idle 循环（第一版移除了 proactive）
 
     // 第一步：收集所有非 Idle 动作组及其动作数量
     struct GroupEntry {
@@ -1154,7 +1186,7 @@ Csm::CubismMotionQueueEntryHandle ModelController::startRandomTapMotion()
             "[ModelController] 无可用的点击动作，回退播放 Idle。\n"
             "提示：在 model3.json 的 Motions 中添加 TapBody 组，\n"
             "      或将未引用的 .motion3.json 文件放入模型目录即可自动注册。\n");
-        return StartMotion(LAppDefine::MotionGroupIdle, 0, LAppDefine::PriorityForce);
+        return beginMotionTransition(LAppDefine::MotionGroupIdle, 0, LAppDefine::PriorityForce);
     }
 
     // 从所有动作（含自动注册）中随机选一个
@@ -1169,8 +1201,8 @@ Csm::CubismMotionQueueEntryHandle ModelController::startRandomTapMotion()
                 LAppPal::PrintMessage(("[ModelController] 播放点击动作: "
                                        + std::string(tapGroups[g].name.GetRawString())
                                        + "_" + std::to_string(motionIdx) + "\n").c_str());
-                return StartMotion(tapGroups[g].name.GetRawString(),
-                                   motionIdx, LAppDefine::PriorityForce);
+                return beginMotionTransition(tapGroups[g].name.GetRawString(),
+                                             motionIdx, LAppDefine::PriorityForce);
             }
             offset += tapGroups[g].count;
         }
@@ -1185,9 +1217,54 @@ Csm::CubismMotionQueueEntryHandle ModelController::startRandomTapMotion()
                            + std::to_string(autoIdx) + "\n").c_str());
 
     if (_motions[motionName]) {
+        // ★ 自动动作的生命周期管理（inline，因不经过 StartMotion 的组路径）
+        const std::string autoKey = motionName.GetRawString();
+
+        // ⚠️ 查缓存（非插入式），缺失则 fail closed
+        auto cacheIt = m_motionParameterCache.find(autoKey);
+        if (cacheIt == m_motionParameterCache.end()) {
+            LAppPal::PrintMessage(("[ModelController] auto motion cache miss for \""
+                                   + autoKey + "\", failing closed\n").c_str());
+            return Csm::InvalidMotionQueueEntryHandleValue;
+        }
+        std::set<int> incomingParams = cacheIt->second;
+
+        // 计算 incoming entryBaselines（含继承，使用共享算法）
+        auto incomingBaselines = MotionLifecycle::computeIncomingBaselines(
+            incomingParams,
+            m_activeMotionState,
+            m_modelGeneration,
+            m_pendingRestoreChain,
+            [this](MotionLifecycle::ParamIndex idx) {
+                return _model->GetParameterValue(static_cast<Csm::csmInt32>(idx));
+            });
+
+        // 准备 outgoing-only 恢复信息（本地，未推入链，使用共享算法）
+        auto [pendingRestoreEntry, hasPendingToPush] = MotionLifecycle::computeOutgoingOnly(
+            m_activeMotionState, m_modelGeneration, incomingParams);
+
         _motionManager->SetReservePriority(LAppDefine::PriorityForce);
-        return _motionManager->StartMotionPriority(
+        auto handle = _motionManager->StartMotionPriority(
             _motions[motionName], false, LAppDefine::PriorityForce);
+
+        if (handle != Csm::InvalidMotionQueueEntryHandleValue) {
+            // ✅ 成功：冲突解决 + 推送 pending restore + 更新 active state
+            // 冲突解决必须在任何条件下执行：新 motion 驱动的参数从全部 pending 中移除
+            MotionLifecycle::resolveConflict(m_pendingRestoreChain, incomingParams);
+            if (hasPendingToPush) {
+                m_pendingRestoreChain.push_back(std::move(pendingRestoreEntry));
+            }
+
+            m_activeMotionState.motionKey = autoKey;
+            m_activeMotionState.handle = handle;
+            m_activeMotionState.drivenParams = std::move(incomingParams);
+            m_activeMotionState.entryBaselines = std::move(incomingBaselines);
+            m_activeMotionState.generation = m_modelGeneration;
+            m_activeMotionState.valid = true;
+        }
+        // ❌ 失败：pendingRestoreEntry 超出作用域丢弃，不修改任何状态
+
+        return handle;
     }
 
     return Csm::InvalidMotionQueueEntryHandleValue;
@@ -1195,11 +1272,7 @@ Csm::CubismMotionQueueEntryHandle ModelController::startRandomTapMotion()
 
 Csm::CubismMotionQueueEntryHandle ModelController::startMotionByGroup(const Csm::csmChar* group, Csm::csmInt32 no, Csm::csmInt32 priority)
 {
-    // 非 Idle 动作开始时退出主动 Idle 循环
-    if (strcmp(group, LAppDefine::MotionGroupIdle) != 0) {
-        m_inProactiveIdleLoop = false;
-    }
-    return StartMotion(group, no, priority);
+    return beginMotionTransition(group, no, priority);
 }
 
 // ====================================================================
@@ -1815,6 +1888,123 @@ void ModelController::applyOverrideParameters()
     for (const auto &[index, value] : m_userParameterOverrides) {
         _model->SetParameterValue(static_cast<Csm::csmInt32>(index), value);
     }
+}
+
+// ====================================================================
+// 🎬 Motion 参数生命周期 — 实现
+// ====================================================================
+
+int ModelController::selectIdleIndex(int count, int lastIndex)
+{
+    if (count <= 1) return 0;
+    const int boundedValue = QRandomGenerator::global()->bounded(count - 1);
+    return MotionLifecycle::selectIdleIndexFromBounded(count, lastIndex, boundedValue);
+}
+
+void ModelController::clearMotionState()
+{
+    m_motionParameterCache.clear();
+    MotionLifecycle::clearMotionState(m_activeMotionState, m_pendingRestoreChain, m_modelGeneration);
+}
+
+void ModelController::applyPendingRestores()
+{
+    auto it = m_pendingRestoreChain.begin();
+    while (it != m_pendingRestoreChain.end()) {
+        // 旧 generation → 废弃
+        if (it->generation != m_modelGeneration) {
+            it = m_pendingRestoreChain.erase(it);
+            continue;
+        }
+
+        Csm::CubismMotionQueueEntry* entry =
+            _motionManager->GetCubismMotionQueueEntry(it->handle);
+
+        if (entry == nullptr || entry->IsFinished()) {
+            // Motion 已从队列移除或已结束 → 一次性恢复后清除
+            for (auto& [idx, val] : it->baselines) {
+                _model->SetParameterValue(static_cast<Csm::csmInt32>(idx), val);
+            }
+            it = m_pendingRestoreChain.erase(it);
+        } else {
+            // Motion 仍在 fadeout → 本帧恢复
+            for (auto& [idx, val] : it->baselines) {
+                _model->SetParameterValue(static_cast<Csm::csmInt32>(idx), val);
+            }
+            ++it;
+        }
+    }
+}
+
+Csm::CubismMotionQueueEntryHandle ModelController::beginMotionTransition(
+    const Csm::csmChar* group, Csm::csmInt32 no, Csm::csmInt32 priority)
+{
+    // ── 1. 构建 incoming motion key ──
+    csmString name = Utils::CubismString::GetFormatedString("%s_%d", group, no);
+    std::string motionKey = name.GetRawString();
+
+    // ── 2. 查 incoming 参数集（非插入式查询） ──
+    auto cacheIt = m_motionParameterCache.find(motionKey);
+    if (cacheIt == m_motionParameterCache.end()) {
+        // ⚠️ 缓存缺失：fail closed，不调用 StartMotion，不修改任何状态
+        LAppPal::PrintMessage(("[ModelController] beginMotionTransition: "
+                               "cache miss for \"" + motionKey
+                               + "\", failing closed\n").c_str());
+        return Csm::InvalidMotionQueueEntryHandleValue;
+    }
+    // cacheIt->second 可能是空 set（该 motion 无 Target="Parameter" 曲线），
+    // 这是正常情况，可以继续生命周期管理。
+    std::set<int> incomingParams = cacheIt->second;
+
+    // ── 3. 计算 incoming entryBaselines（三层继承链） ──
+    auto incomingBaselines = MotionLifecycle::computeIncomingBaselines(
+        incomingParams,
+        m_activeMotionState,
+        m_modelGeneration,
+        m_pendingRestoreChain,
+        [this](MotionLifecycle::ParamIndex idx) {
+            return _model->GetParameterValue(static_cast<Csm::csmInt32>(idx));
+        });
+
+    // ── 4. 准备 outgoing-only 恢复信息（本地，未推入链） ──
+    auto [pendingRestoreEntry, hasPendingToPush] = MotionLifecycle::computeOutgoingOnly(
+        m_activeMotionState, m_modelGeneration, incomingParams);
+
+    // ── 5. 执行 StartMotion ──
+    Csm::CubismMotionQueueEntryHandle handle = StartMotion(group, no, priority);
+
+    if (handle != Csm::InvalidMotionQueueEntryHandleValue) {
+        // ✅ 成功：冲突解决 + 推送 pending restore + 更新 active state
+        // 冲突解决必须在任何条件下执行：新 motion 驱动的参数从全部 pending 中移除
+        MotionLifecycle::resolveConflict(m_pendingRestoreChain, incomingParams);
+        if (hasPendingToPush) {
+            m_pendingRestoreChain.push_back(std::move(pendingRestoreEntry));
+        }
+        m_activeMotionState.motionKey = motionKey;
+        m_activeMotionState.handle = handle;
+        m_activeMotionState.drivenParams = std::move(incomingParams);
+        m_activeMotionState.entryBaselines = std::move(incomingBaselines);
+        m_activeMotionState.generation = m_modelGeneration;
+        m_activeMotionState.valid = true;
+    }
+    // ❌ 失败：pendingRestoreEntry 超出作用域丢弃，不修改任何状态
+
+    return handle;
+}
+
+Csm::CubismMotionQueueEntryHandle ModelController::startRandomIdleMotion()
+{
+    const Csm::csmInt32 count = _modelJson->GetMotionCount(LAppDefine::MotionGroupIdle);
+    if (count <= 0)
+        return Csm::InvalidMotionQueueEntryHandleValue;
+
+    // 选择 Idle 索引（避免连续重复）
+    const Csm::csmInt32 index = (count == 1) ? 0
+        : selectIdleIndex(static_cast<int>(count), m_lastIdleIndex);
+    m_lastIdleIndex = static_cast<int>(index);
+
+    // 通过生命周期管理启动
+    return beginMotionTransition(LAppDefine::MotionGroupIdle, index, LAppDefine::PriorityForce);
 }
 
 // ====================================================================
