@@ -47,11 +47,23 @@ struct ActiveMotionState {
 };
 
 /// 待恢复参数状态（按 outgoing handle 管理）
+///
+/// 平滑恢复状态机：
+///   initialized=false → [首次 apply]  初始化 startValues ← 当前模型值
+///   initialized=true  → [平滑中]      每帧 smoothstep(startValues → baselines)
+///   elapsed≥duration  → [锁定中]      写精确 baseline（handle 未结束时防止 FadeOut 残值）
+///   elapsed≥duration + handleFinished  → 写最终 baseline 后删除条目
 template<typename HandleT>
 struct PendingRestoreEntry {
     HandleT handle = HandleT{};
-    std::map<ParamIndex, float> baselines; // paramIndex → 应恢复的值
+    std::map<ParamIndex, float> baselines;   // paramIndex → 恢复目标值
     int generation = 0;
+
+    // ── 平滑恢复状态（由 applyPendingRestores 管理） ──
+    std::map<ParamIndex, float> startValues; // paramIndex → 插值起点（首次 apply 时采集）
+    float elapsed = 0.0f;                    // 已累积时间（秒）
+    bool initialized = false;                // startValues 是否已初始化
+    float duration = 0.10f;                  // 平滑持续时间（秒）
 };
 
 /// 待恢复参数链（可同时存在多个 FadeOut 的 Motion）
@@ -186,22 +198,104 @@ void resolveConflict(PendingRestoreChain<HandleT>& pendingChain,
 
 // ====================================================================
 // handleNaturalEnd — 自然结束处理（不清理 pending chain）
+//
+// 不再直接瞬时 SetParameterValue。改为将 active 的 entryBaselines
+// 推入 pendingChain，由 applyPendingRestores 统一平滑恢复。
 // ====================================================================
 
 template<typename HandleT>
 void handleNaturalEnd(
     ActiveMotionState<HandleT>& activeState,
     int currentGeneration,
-    const std::function<void(ParamIndex, float)>& setParamValue)
+    PendingRestoreChain<HandleT>& pendingChain)
 {
     if (activeState.valid && activeState.generation == currentGeneration) {
-        // 恢复 active motion 的所有 entry baseline 到模型
-        for (const auto& [idx, val] : activeState.entryBaselines) {
-            setParamValue(idx, val);
-        }
+        // 创建 pending entry（handle = 空 = 无 motion 要等，平滑完直接删除）
+        PendingRestoreEntry<HandleT> pr;
+        pr.handle = HandleT{};
+        pr.baselines = activeState.entryBaselines;
+        pr.generation = currentGeneration;
+        pendingChain.push_back(std::move(pr));
+
         activeState.valid = false;
     }
-    // 不清理 pending chain：已有 pending 由 applyPendingRestores 正常管理
+    // 不清理 pending chain 中其他条目
+}
+
+// ====================================================================
+// applyPendingRestores — 平滑或完整恢复 pending 链中的参数
+//
+// 状态机：
+//   ┌─initialized=false─→ 初始化 startValues ← readParam
+//   ├─elapsed<duration ─→ smoothstep(startValues → baselines)，积累 elapsed
+//   ├─elapsed≥duration  ─→ 写精确 baseline
+//   │   └─handle 未结束 ─→ 保持 entry（锁定 baseline 防 FadeOut 残值）
+//   │   └─handle 已结束 ─→ 写最终 baseline 后 erase
+// ====================================================================
+
+template<typename HandleT, typename FnWrite, typename FnRead, typename FnIsFinished>
+void applyPendingRestores(
+    PendingRestoreChain<HandleT>& chain,
+    int currentGeneration,
+    float deltaTime,
+    FnWrite writeParam,
+    FnRead readParam,
+    FnIsFinished isHandleFinished)
+{
+    // ── 0. deltaTime 非负保护 ──
+    deltaTime = std::max(deltaTime, 0.0f);
+
+    auto it = chain.begin();
+    while (it != chain.end()) {
+        // ── 1. Generation 不一致 → 废弃 ──
+        if (it->generation != currentGeneration) {
+            it = chain.erase(it);
+            continue;
+        }
+
+        // ── 2. 首次应用：采集当前参数值作为插值起点 ──
+        //    注意：调用者保证在 UpdateMotion 之后执行此函数
+        if (!it->initialized) {
+            for (const auto& [idx, baseline] : it->baselines) {
+                it->startValues[idx] = readParam(idx);
+            }
+            it->initialized = true;
+        }
+
+        // ── 3. 确定 handle 状态 ──
+        const bool isNullHandle = (it->handle == HandleT{});
+        const bool handleFinished = isNullHandle || isHandleFinished(it->handle);
+
+        // ── 4. 推进时间并计算 smoothstep ──
+        it->elapsed += deltaTime;
+        const float safeDuration = std::max(it->duration, 0.001f);
+        const float progress = std::min(it->elapsed / safeDuration, 1.0f);
+        const float eased = progress * progress * (3.0f - 2.0f * progress); // smoothstep
+        const bool smoothingComplete = (progress >= 1.0f);
+
+        // ── 5. 三路分支 ──
+        if (smoothingComplete && handleFinished) {
+            // ⑤A. 平滑已完成 + handle 已结束 → 写入精确 baseline 后删除
+            for (const auto& [idx, baseline] : it->baselines) {
+                writeParam(idx, baseline);
+            }
+            it = chain.erase(it);
+        } else if (smoothingComplete) {
+            // ⑤B. 平滑已完成但 handle 仍在（FadeOut 未结束）
+            //     继续每帧写入精确 baseline，防止旧 FadeOut 再写回残值
+            for (const auto& [idx, baseline] : it->baselines) {
+                writeParam(idx, baseline);
+            }
+            ++it;
+        } else {
+            // ⑤C. 平滑中：每帧写入插值
+            for (const auto& [idx, baseline] : it->baselines) {
+                const float start = it->startValues[idx];
+                writeParam(idx, start + (baseline - start) * eased);
+            }
+            ++it;
+        }
+    }
 }
 
 // ====================================================================

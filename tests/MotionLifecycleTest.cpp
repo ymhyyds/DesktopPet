@@ -74,6 +74,16 @@ private slots:
 
     // ── clearMotionState ──
     void test_clearMotionState_resetsAll();
+
+    // ── 平滑恢复测试 ──
+    void test_smoothRestore_startToBaseline();
+    void test_smoothRestore_progress0_05_1();
+    void test_smoothRestore_holdsAfterCompletion();
+    void test_smoothRestore_handleGoneStillSmooths();
+    void test_smoothRestore_handleLongLived();
+    void test_smoothRestore_conflictCancels();
+    void test_smoothRestore_generationChangeClears();
+    void test_smoothRestore_edgeCases();
 };
 
 // ============================================================================
@@ -502,7 +512,7 @@ void MotionLifecycleTest::test_rollback_stateUnchanged()
 }
 
 // ============================================================================
-// 自然结束: 恢复所有参数 + 状态清除（不清理 pending chain）
+// 自然结束: 推入 pending chain 由平滑恢复（不直接 SetParameterValue）
 // ============================================================================
 
 void MotionLifecycleTest::test_naturalEnd_restoresAllParams()
@@ -516,12 +526,7 @@ void MotionLifecycleTest::test_naturalEnd_restoresAllParams()
     active.entryBaselines[2] = 0.2f;
     active.entryBaselines[3] = 0.3f;
 
-    std::map<int, float> model;
-    model[1] = 0.9f;
-    model[2] = 0.8f;
-    model[3] = 0.7f;
-
-    // 已有 pending
+    // 已有 pending（不受自然结束影响）
     TestPendingChain chain;
     chain.push_back({});
     chain[0].handle = 50;
@@ -529,19 +534,18 @@ void MotionLifecycleTest::test_naturalEnd_restoresAllParams()
     chain[0].baselines[10] = 0.5f;
     QCOMPARE(chain.size(), 1);
 
-    // 自然结束
-    MotionLifecycle::handleNaturalEnd(
-        active, 0,
-        [&](int idx, float val) { model[idx] = val; });
+    // 自然结束 → 推入 pending entry 而非立即 set
+    MotionLifecycle::handleNaturalEnd(active, 0, chain);
 
-    // 参数恢复
-    QCOMPARE(model[1], 0.1f);
-    QCOMPARE(model[2], 0.2f);
-    QCOMPARE(model[3], 0.3f);
+    // entryBaselines 被推入 pending 链
+    QCOMPARE(chain.size(), 2);
+    QCOMPARE(chain[1].baselines.size(), 3);
+    QCOMPARE(chain[1].baselines[1], 0.1f);
+    QCOMPARE(chain[1].baselines[2], 0.2f);
+    QCOMPARE(chain[1].baselines[3], 0.3f);
     QVERIFY(!active.valid);
 
-    // pending chain 未被清除
-    QCOMPARE(chain.size(), 1);
+    // 原有 pending 条目未被清除
     QCOMPARE(chain[0].baselines.at(10), 0.5f);
 }
 
@@ -569,6 +573,416 @@ void MotionLifecycleTest::test_clearMotionState_resetsAll()
     QVERIFY(!active.valid);
     QCOMPARE(chain.size(), 0);
     QCOMPARE(gen, 6);
+}
+
+// ============================================================================
+// 平滑恢复测试
+// ============================================================================
+
+namespace { // 匿名命名空间：测试辅助函数
+
+/// 在单次 applyPendingRestores 后断言模型值
+void assertModelValue(const std::map<int, float>& model, int idx, float expected, float tol = 0.0001f)
+{
+    auto it = model.find(idx);
+    QVERIFY2(it != model.end(), ("param " + std::to_string(idx) + " not in model").c_str());
+    QVERIFY2(std::abs(it->second - expected) <= tol,
+             ("param " + std::to_string(idx) + ": expected " + std::to_string(expected)
+              + ", got " + std::to_string(it->second)).c_str());
+}
+
+/// smoothstep(progress) 纯函数，用于测试中直接计算
+float smoothstep(float t)
+{
+    return t * t * (3.0f - 2.0f * t);
+}
+
+} // anonymous namespace
+
+// ============================================================================
+// 平滑恢复：起点到 baseline 的完整插值路径
+// ============================================================================
+
+void MotionLifecycleTest::test_smoothRestore_startToBaseline()
+{
+    // 单参数：baseline=1.0，初始模型值=0.5
+    TestPendingEntry entry;
+    entry.handle = 100;
+    entry.generation = 0;
+    entry.baselines[10] = 1.0f;
+    entry.duration = 0.2f;
+    TestPendingChain chain = {entry};
+
+    std::map<int, float> model;
+    model[10] = 0.5f;
+
+    // [A] 首次 apply（elapsed += 0）：初始化 startValues，progress=0
+    MotionLifecycle::applyPendingRestores(
+        chain, 0, 0.0f,
+        [&](int idx, float v) { model[idx] = v; },
+        [&](int idx) -> float { return model[idx]; },
+        [](int) { return false; });
+
+    QCOMPARE(chain.size(), 1);
+    QVERIFY(chain[0].initialized);
+    assertModelValue(model, 10, 0.5f); // progress=0 → start
+
+    // [B] 推进到 t=0.5（progress=0.5）：smoothstep(0.5)=0.5
+    MotionLifecycle::applyPendingRestores(
+        chain, 0, 0.1f,
+        [&](int idx, float v) { model[idx] = v; },
+        [&](int idx) -> float { return model[idx]; },
+        [](int) { return false; });
+
+    QCOMPARE(chain.size(), 1);
+    float expectedAtHalf = 0.5f + (1.0f - 0.5f) * smoothstep(0.5f); // 0.5 + 0.5*0.5 = 0.75
+    assertModelValue(model, 10, expectedAtHalf);
+
+    // [C] 推进到 completion（progress=1.0）
+    MotionLifecycle::applyPendingRestores(
+        chain, 0, 0.1f,
+        [&](int idx, float v) { model[idx] = v; },
+        [&](int idx) -> float { return model[idx]; },
+        [](int) { return false; });
+
+    // progress=1.0, handle not finished → ⑤B（保持 baseline）
+    QCOMPARE(chain.size(), 1);
+    assertModelValue(model, 10, 1.0f); // baseline
+
+    // [D] handle 结束 → ⑤A（删除）
+    MotionLifecycle::applyPendingRestores(
+        chain, 0, 0.0f,
+        [&](int idx, float v) { model[idx] = v; },
+        [&](int idx) -> float { return model[idx]; },
+        [](int) { return true; });
+
+    QCOMPARE(chain.size(), 0);
+    assertModelValue(model, 10, 1.0f); // final
+}
+
+// ============================================================================
+// 平滑恢复：progress=0 / 0.5 / 1 单独验证
+// ============================================================================
+
+void MotionLifecycleTest::test_smoothRestore_progress0_05_1()
+{
+    // 准备：start=0.2, baseline=0.8, duration=0.2
+    TestPendingEntry entry;
+    entry.handle = 100;
+    entry.generation = 0;
+    entry.baselines[10] = 0.8f;
+    entry.duration = 0.2f;
+    TestPendingChain chain = {entry};
+
+    std::map<int, float> model;
+    model[10] = 0.2f;
+
+    auto writeFn = [&](int idx, float v) { model[idx] = v; };
+    auto readFn  = [&](int idx) -> float { return model[idx]; };
+    auto isDone  = [](int) { return false; };
+
+    // progress=0（deltaTime=0 首次调用）
+    MotionLifecycle::applyPendingRestores(chain, 0, 0.0f, writeFn, readFn, isDone);
+    QCOMPARE(chain.size(), 1);
+    QVERIFY(chain[0].initialized);
+    assertModelValue(model, 10, 0.2f); // start
+
+    // progress=0.5（再推进 0.1s）
+    MotionLifecycle::applyPendingRestores(chain, 0, 0.1f, writeFn, readFn, isDone);
+    float expected = 0.2f + (0.8f - 0.2f) * smoothstep(0.5f); // = 0.2 + 0.6*0.5 = 0.5
+    assertModelValue(model, 10, expected);
+
+    // progress=1.0（再推进 0.1s）
+    MotionLifecycle::applyPendingRestores(chain, 0, 0.1f, writeFn, readFn, isDone);
+    assertModelValue(model, 10, 0.8f); // baseline
+    QCOMPARE(chain.size(), 1); // handle still alive → ⑤B
+}
+
+// ============================================================================
+// 完成平滑后持续锁定 baseline（handle 长时间存在）
+// ============================================================================
+
+void MotionLifecycleTest::test_smoothRestore_holdsAfterCompletion()
+{
+    TestPendingEntry entry;
+    entry.handle = 100;
+    entry.generation = 0;
+    entry.baselines[10] = 1.0f;
+    entry.duration = 0.1f;
+    TestPendingChain chain = {entry};
+
+    std::map<int, float> model;
+    model[10] = 0.0f;
+
+    auto writeFn = [&](int idx, float v) { model[idx] = v; };
+    auto readFn  = [&](int idx) -> float { return model[idx]; };
+
+    bool handleFinished = false;
+    auto handleCheck = [&](int) { return handleFinished; };
+
+    // 运行至平滑完成
+    MotionLifecycle::applyPendingRestores(chain, 0, 0.1f, writeFn, readFn, handleCheck);
+    QCOMPARE(chain.size(), 1);  // ⑤B：handle 仍在
+    assertModelValue(model, 10, 1.0f);
+
+    // 模拟 FadeOut 试图写回残值
+    model[10] = 0.3f;
+    MotionLifecycle::applyPendingRestores(chain, 0, 0.016f, writeFn, readFn, handleCheck);
+    QCOMPARE(chain.size(), 1);  // 仍锁定
+    assertModelValue(model, 10, 1.0f); // baseline 覆盖
+
+    // handle 结束
+    handleFinished = true;
+    MotionLifecycle::applyPendingRestores(chain, 0, 0.016f, writeFn, readFn, handleCheck);
+    QCOMPARE(chain.size(), 0);  // ⑤A：删除
+    assertModelValue(model, 10, 1.0f);
+}
+
+// ============================================================================
+// handle 提前消失但平滑尚未完成 → 继续平滑至完成
+// ============================================================================
+
+void MotionLifecycleTest::test_smoothRestore_handleGoneStillSmooths()
+{
+    TestPendingEntry entry;
+    entry.handle = 100;
+    entry.generation = 0;
+    entry.baselines[10] = 1.0f;
+    entry.duration = 0.3f;
+    TestPendingChain chain = {entry};
+
+    std::map<int, float> model;
+    model[10] = 0.0f;
+
+    auto writeFn = [&](int idx, float v) { model[idx] = v; };
+    auto readFn  = [&](int idx) -> float { return model[idx]; };
+
+    bool handleFinished = false;
+    auto handleCheck = [&](int) { return handleFinished; };
+
+    // [A] 初始化
+    MotionLifecycle::applyPendingRestores(chain, 0, 0.0f, writeFn, readFn, handleCheck);
+    QCOMPARE(chain.size(), 1);
+
+    // [B] 平滑开始不久后，handle 消失
+    MotionLifecycle::applyPendingRestores(chain, 0, 0.05f, writeFn, readFn, handleCheck);
+    float valAfterHandleGone = model[10];
+    QVERIFY(valAfterHandleGone > 0.0f && valAfterHandleGone < 1.0f);
+
+    // handle 标记为结束（模拟 motion 被移除）
+    handleFinished = true;
+
+    // [C] 继续平滑
+    MotionLifecycle::applyPendingRestores(chain, 0, 0.1f, writeFn, readFn, handleCheck);
+    QCOMPARE(chain.size(), 1); // 仍在平滑
+    float valMid = model[10];
+    QVERIFY(valMid > valAfterHandleGone && valMid < 1.0f);
+
+    // [D] 推进到完成
+    MotionLifecycle::applyPendingRestores(chain, 0, 0.15f, writeFn, readFn, handleCheck);
+    QCOMPARE(chain.size(), 0); // ⑤A：平滑 + handle 都完成 → 删除
+    assertModelValue(model, 10, 1.0f);
+}
+
+// ============================================================================
+// handle 长时间存在：完成后继续锁定，handle 消失后才删除
+// ============================================================================
+
+void MotionLifecycleTest::test_smoothRestore_handleLongLived()
+{
+    TestPendingEntry entry;
+    entry.handle = 100;
+    entry.generation = 0;
+    entry.baselines[10] = 0.5f;
+    entry.duration = 0.12f;
+    TestPendingChain chain = {entry};
+
+    std::map<int, float> model;
+    model[10] = 0.0f;
+
+    auto writeFn = [&](int idx, float v) { model[idx] = v; };
+    auto readFn  = [&](int idx) -> float { return model[idx]; };
+
+    // handle 永不过期
+    auto handleCheck = [](int) { return false; };
+
+    // 运行至平滑完成
+    MotionLifecycle::applyPendingRestores(chain, 0, 0.12f, writeFn, readFn, handleCheck);
+    assertModelValue(model, 10, 0.5f);
+    QCOMPARE(chain.size(), 1); // ⑤B：handle 未结束，锁定
+
+    // 再跑 100 帧（模拟 1.6 秒），一直锁定
+    for (int i = 0; i < 100; ++i) {
+        model[10] = 0.1f; // 模拟干扰
+        MotionLifecycle::applyPendingRestores(chain, 0, 0.016f, writeFn, readFn, handleCheck);
+        assertModelValue(model, 10, 0.5f);
+        QCOMPARE(chain.size(), 1);
+    }
+
+    // handle 终于结束
+    auto handleCheckDone = [](int) { return true; };
+    MotionLifecycle::applyPendingRestores(chain, 0, 0.016f, writeFn, readFn, handleCheckDone);
+    QCOMPARE(chain.size(), 0);
+}
+
+// ============================================================================
+// incoming 冲突取消恢复
+// ============================================================================
+
+void MotionLifecycleTest::test_smoothRestore_conflictCancels()
+{
+    TestPendingEntry entry;
+    entry.handle = 100;
+    entry.generation = 0;
+    entry.baselines[10] = 1.0f;
+    entry.baselines[20] = 0.5f;
+    entry.duration = 0.15f;
+    TestPendingChain chain = {entry};
+
+    std::map<int, float> model;
+    model[10] = 0.0f;
+    model[20] = 0.0f;
+
+    // 开始平滑
+    MotionLifecycle::applyPendingRestores(
+        chain, 0, 0.075f,
+        [&](int idx, float v) { model[idx] = v; },
+        [&](int idx) -> float { return model[idx]; },
+        [](int) { return false; });
+
+    QCOMPARE(chain.size(), 1);
+    QVERIFY(model[10] > 0.0f && model[10] < 1.0f);
+
+    // 新 motion 驱动 param 10 → 从 pending 中移除
+    MotionLifecycle::resolveConflict(chain, {10});
+
+    // param 10 被移除，param 20 保留
+    QCOMPARE(chain.size(), 1);
+    QCOMPARE(chain[0].baselines.size(), 1);
+    QVERIFY(chain[0].baselines.find(10) == chain[0].baselines.end());
+    QCOMPARE(chain[0].baselines[20], 0.5f);
+
+    // param 10 应不再被写入
+    // 继续平滑 param 20 至完成
+    MotionLifecycle::applyPendingRestores(
+        chain, 0, 0.075f,
+        [&](int idx, float v) { model[idx] = v; },
+        [&](int idx) -> float { return model[idx]; },
+        [](int) { return false; });
+
+    assertModelValue(model, 20, 0.5f); // baseline reached
+    // param 10 保持在上一帧的平滑值（不再被 pending 写入）
+    float val10 = model[10];
+    QVERIFY(val10 > 0.0f && val10 < 1.0f);
+}
+
+// ============================================================================
+// generation 变化清除平滑
+// ============================================================================
+
+void MotionLifecycleTest::test_smoothRestore_generationChangeClears()
+{
+    TestPendingEntry entry;
+    entry.handle = 100;
+    entry.generation = 0;
+    entry.baselines[10] = 1.0f;
+    entry.duration = 0.2f;
+    TestPendingChain chain = {entry};
+
+    std::map<int, float> model;
+    model[10] = 0.0f;
+
+    // 开始平滑
+    MotionLifecycle::applyPendingRestores(
+        chain, 0, 0.05f,
+        [&](int idx, float v) { model[idx] = v; },
+        [&](int idx) -> float { return model[idx]; },
+        [](int) { return false; });
+
+    QCOMPARE(chain.size(), 1);
+
+    // generation 变化（模拟模型切换）
+    MotionLifecycle::applyPendingRestores(
+        chain, 1, 0.05f,  // currentGeneration=1 ≠ entry.generation=0
+        [&](int idx, float v) { model[idx] = v; },
+        [&](int idx) -> float { return model[idx]; },
+        [](int) { return false; });
+
+    QCOMPARE(chain.size(), 0); // 清除
+}
+
+// ============================================================================
+// 边界条件：deltaTime=0、deltaTime>duration、duration 极小
+// ============================================================================
+
+void MotionLifecycleTest::test_smoothRestore_edgeCases()
+{
+    // ── case 1: deltaTime=0 不崩溃、不推进 ──
+    {
+        TestPendingEntry entry;
+        entry.handle = 100;
+        entry.generation = 0;
+        entry.baselines[10] = 1.0f;
+        entry.duration = 0.15f;
+        TestPendingChain chain = {entry};
+
+        std::map<int, float> model;
+        model[10] = 0.3f;
+
+        MotionLifecycle::applyPendingRestores(
+            chain, 0, 0.0f,
+            [&](int idx, float v) { model[idx] = v; },
+            [&](int idx) -> float { return model[idx]; },
+            [](int) { return false; });
+
+        assertModelValue(model, 10, 0.3f); // 不变
+        QCOMPARE(chain[0].elapsed, 0.0f);  // 时间不推进
+        QVERIFY(chain[0].initialized);
+    }
+
+    // ── case 2: deltaTime > duration → 跳至 completion ──
+    {
+        TestPendingEntry entry;
+        entry.handle = 100;
+        entry.generation = 0;
+        entry.baselines[10] = 1.0f;
+        entry.duration = 0.15f;
+        TestPendingChain chain = {entry};
+
+        std::map<int, float> model;
+        model[10] = 0.3f;
+
+        MotionLifecycle::applyPendingRestores(
+            chain, 0, 1.0f, // deltaTime >> duration
+            [&](int idx, float v) { model[idx] = v; },
+            [&](int idx) -> float { return model[idx]; },
+            [](int) { return true; }); // handle finished
+
+        assertModelValue(model, 10, 1.0f); // 直接跳到 baseline
+        QCOMPARE(chain.size(), 0);         // 删除
+    }
+
+    // ── case 3: duration=0 → safeDuration 兜底到 0.001 ──
+    {
+        TestPendingEntry entry;
+        entry.handle = 100;
+        entry.generation = 0;
+        entry.baselines[10] = 0.8f;
+        entry.duration = 0.0f;  // 不合法但不应崩溃
+        TestPendingChain chain = {entry};
+
+        std::map<int, float> model;
+        model[10] = 0.2f;
+
+        MotionLifecycle::applyPendingRestores(
+            chain, 0, 0.016f,
+            [&](int idx, float v) { model[idx] = v; },
+            [&](int idx) -> float { return model[idx]; },
+            [](int) { return true; }); // handle finished
+
+        assertModelValue(model, 10, 0.8f); // 跳到 baseline
+        QCOMPARE(chain.size(), 0);
+    }
 }
 
 QTEST_APPLESS_MAIN(MotionLifecycleTest)
