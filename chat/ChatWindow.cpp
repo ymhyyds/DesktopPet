@@ -91,6 +91,7 @@ ChatWindow::ChatWindow(QWidget *parent)
     QTimer::singleShot(0, this, [this]() {
         if (m_inputEdit) m_inputEdit->setFixedHeight(36);
     });
+
 }
 
 void ChatWindow::setupUi()
@@ -491,16 +492,9 @@ QString ChatWindow::buildAssistantBubble(const QString &, const QString &text)
 
 QString ChatWindow::buildUserBubble(const QString &, const QString &text)
 {
-    // 使用 table 实现：块级右对齐将整个表格推到右侧，
-    // 单元格内 text-align:left 保证文字左对齐。
-    // 表格无固定宽度，内容短时自动收缩，内容长时自然换行。
-    return QStringLiteral(
-        "<table style='border:none;' cellpadding='0' cellspacing='0'><tr>"
-        "<td style='text-align:left; border:none; "
-        "font-size:15px; line-height:1.8; padding:2px 0;'>"
-        "%1"
-        "</td></tr></table>"
-    ).arg(text.toHtmlEscaped());
+    // 纯文本容器，不使用 <table>，右对齐由 appendFormattedLine 的 block format 控制。
+    // CSS line-height 在 QTextDocument 中无效，因此去掉 table cell 中的 line-height 设置。
+    return QStringLiteral("<span style='font-size:15px;'>%1</span>").arg(text.toHtmlEscaped());
 }
 
 void ChatWindow::appendUserMessage(const QString &text)
