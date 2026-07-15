@@ -862,13 +862,11 @@ void ModelController::ModelParamUpdate()
             // ★ 使用 Idle 选择 + 生命周期管理启动下一个 Idle
             auto handle = startRandomIdleMotion();
             if (handle == Csm::InvalidMotionQueueEntryHandleValue) {
-                // 自然结束，无下一动作 → 恢复 active entry baselines（不 clear pending chain）
+                // 自然结束，无下一动作 → 推入 pending chain 由 applyPendingRestores 平滑恢复
                 MotionLifecycle::handleNaturalEnd(
                     m_activeMotionState,
                     m_modelGeneration,
-                    [this](MotionLifecycle::ParamIndex idx, float val) {
-                        _model->SetParameterValue(static_cast<Csm::csmInt32>(idx), val);
-                    });
+                    m_pendingRestoreChain);
             }
         }
     }
@@ -1909,31 +1907,23 @@ void ModelController::clearMotionState()
 
 void ModelController::applyPendingRestores()
 {
-    auto it = m_pendingRestoreChain.begin();
-    while (it != m_pendingRestoreChain.end()) {
-        // 旧 generation → 废弃
-        if (it->generation != m_modelGeneration) {
-            it = m_pendingRestoreChain.erase(it);
-            continue;
-        }
+    const Csm::csmFloat32 deltaTimeSeconds = LAppPal::GetDeltaTime();
 
-        Csm::CubismMotionQueueEntry* entry =
-            _motionManager->GetCubismMotionQueueEntry(it->handle);
-
-        if (entry == nullptr || entry->IsFinished()) {
-            // Motion 已从队列移除或已结束 → 一次性恢复后清除
-            for (auto& [idx, val] : it->baselines) {
-                _model->SetParameterValue(static_cast<Csm::csmInt32>(idx), val);
-            }
-            it = m_pendingRestoreChain.erase(it);
-        } else {
-            // Motion 仍在 fadeout → 本帧恢复
-            for (auto& [idx, val] : it->baselines) {
-                _model->SetParameterValue(static_cast<Csm::csmInt32>(idx), val);
-            }
-            ++it;
-        }
-    }
+    MotionLifecycle::applyPendingRestores(
+        m_pendingRestoreChain,
+        m_modelGeneration,
+        deltaTimeSeconds,
+        [this](MotionLifecycle::ParamIndex idx, float val) {
+            _model->SetParameterValue(static_cast<Csm::csmInt32>(idx), val);
+        },
+        [this](MotionLifecycle::ParamIndex idx) -> float {
+            return _model->GetParameterValue(static_cast<Csm::csmInt32>(idx));
+        },
+        [this](const Csm::CubismMotionQueueEntryHandle& handle) -> bool {
+            Csm::CubismMotionQueueEntry* entry =
+                _motionManager->GetCubismMotionQueueEntry(handle);
+            return entry == nullptr || entry->IsFinished();
+        });
 }
 
 Csm::CubismMotionQueueEntryHandle ModelController::beginMotionTransition(
