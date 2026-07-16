@@ -6,10 +6,11 @@
 #include <QActionGroup>
 #include <QApplication>
 #include <QStyle>
-#include <QSettings>
 #include <QIcon>
 #include <QSignalBlocker>
 #include <QDebug>
+
+#include "../core/AutoStartManager.h"
 
 TrayManager::TrayManager(const QStringList &availableCharacters,
                           const QString &currentCharacter,
@@ -84,14 +85,11 @@ void TrayManager::buildMenu(const QStringList &availableCharacters, const QStrin
     m_autoStartAction->setCheckable(true);
 
 #ifdef Q_OS_WIN
-    // 精确比较注册表值与当前带引号的 EXE 路径（旧路径残留时不勾选）
-    QSettings autoStartReg(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
-                            QSettings::NativeFormat);
-    const QString autoAppName = QApplication::applicationName();
+    // 精确比较 Startup 文件夹快捷方式与当前 EXE 路径（旧路径残留时不勾选）
     const QString autoExePath = QApplication::applicationFilePath().replace('/', '\\');
-    const bool autoStartMatches = autoStartReg.contains(autoAppName)
-        && autoStartReg.value(autoAppName).toString()
-            == QStringLiteral("\"%1\"").arg(autoExePath);
+    const QString autoLinkPath = AutoStartManager::shortcutPath();
+    const bool autoStartMatches = !autoLinkPath.isEmpty()
+        && AutoStartManager::verifyShortcut(autoLinkPath, autoExePath);
     m_autoStartAction->setChecked(autoStartMatches);
 #endif
 

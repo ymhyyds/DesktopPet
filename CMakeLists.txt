@@ -164,6 +164,7 @@ target_link_libraries(DesktopPet PRIVATE
     Qt6::OpenGLWidgets
     Qt6::Multimedia
     dwmapi.lib
+    shlwapi.lib
 )
 
 # ---------------------------------------------------------------------------

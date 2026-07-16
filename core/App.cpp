@@ -1221,60 +1221,83 @@ bool App::switchCharacter(const QString &characterName)
 void App::handleAutoStartToggle(bool enabled)
 {
 #ifdef Q_OS_WIN
-    const QString kRegPath = QStringLiteral(
-        "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-    const QString appName = QApplication::applicationName();
     const QString exePath = QApplication::applicationFilePath().replace('/', '\\');
+    const QString exeDir = QCoreApplication::applicationDirPath();
+    const QString linkPath = AutoStartManager::shortcutPath();
 
-    // (1) 保存原注册表值及是否存在
-    QSettings reg(kRegPath, QSettings::NativeFormat);
-    const AutoStartManager::SavedRegValue saved = AutoStartManager::savePrevious(reg, appName);
-
-    // (2) 执行写入/删除
-    const bool applied = AutoStartManager::applyAutoStart(reg, appName, enabled, exePath);
-    if (!applied) {
-        // 写入/删除 + sync 失败 → 恢复原值
-        AutoStartManager::restorePrevious(reg, appName, saved);
-
-        // 验证恢复结果
-        QSettings restoreVerify(kRegPath, QSettings::NativeFormat);
-        if (!AutoStartManager::verifyRestore(restoreVerify, appName, saved)) {
-            qCritical() << "[App] 开机自启注册表恢复失败！";
-        }
-
-        // 根据真实注册表状态设置菜单（精确比较当前 EXE 路径）
-        const bool actualEnabled = AutoStartManager::verifyAutoStart(restoreVerify, appName, true, exePath);
-        m_trayManager->setAutoStartChecked(actualEnabled);
-
-        // 用户可见提示
+    if (linkPath.isEmpty()) {
+        qCritical() << "[App] 无法获取 Startup 文件夹路径";
+        m_trayManager->setAutoStartChecked(false);
         QMessageBox::warning(qApp->activeWindow(),
             QStringLiteral("开机自启"),
-            QStringLiteral("无法写入开机自启注册表，已恢复原值。\n"
+            QStringLiteral("无法获取 Startup 文件夹路径。"));
+        return;
+    }
+
+    // (1) 备份现有快捷方式
+    const AutoStartManager::ShortcutBackup backup =
+        AutoStartManager::backupShortcut(linkPath);
+
+    // (2) 执行创建/删除
+    bool applied = false;
+    if (enabled) {
+        applied = AutoStartManager::createShortcut(linkPath, exePath, exeDir);
+    } else {
+        applied = AutoStartManager::removeShortcut(linkPath);
+    }
+
+    if (!applied) {
+        // 操作失败 → 恢复
+        AutoStartManager::restoreBackup(linkPath, backup);
+        if (!AutoStartManager::verifyRestore(linkPath, backup)) {
+            qCritical() << "[App] 开机自启快捷方式恢复失败！";
+        }
+
+        const bool actualEnabled = AutoStartManager::verifyShortcut(linkPath, exePath);
+        m_trayManager->setAutoStartChecked(actualEnabled);
+
+        QMessageBox::warning(qApp->activeWindow(),
+            QStringLiteral("开机自启"),
+            QStringLiteral("无法设置开机自启快捷方式，已恢复原状态。\n"
                            "请检查权限或防病毒软件设置。"));
         return;
     }
 
-    // (3) 精确验证写入值或删除结果
-    QSettings verifyReg(kRegPath, QSettings::NativeFormat);
-    const bool verified = AutoStartManager::verifyAutoStart(verifyReg, appName, enabled, exePath);
-    if (!verified) {
-        // 验证失败 → 恢复原值
-        AutoStartManager::restorePrevious(reg, appName, saved);
-
-        // 验证恢复结果
-        if (!AutoStartManager::verifyRestore(verifyReg, appName, saved)) {
-            qCritical() << "[App] 开机自启注册表恢复失败！";
+    // (3) 精确验证
+    const bool verified = AutoStartManager::verifyShortcut(linkPath, exePath);
+    if (enabled && !verified) {
+        // 创建后验证失败（目标不匹配）
+        AutoStartManager::restoreBackup(linkPath, backup);
+        if (!AutoStartManager::verifyRestore(linkPath, backup)) {
+            qCritical() << "[App] 开机自启快捷方式恢复失败！";
         }
 
-        // 根据真实注册表状态设置菜单（精确比较当前 EXE 路径）
-        const bool actualEnabled = AutoStartManager::verifyAutoStart(verifyReg, appName, true, exePath);
+        const bool actualEnabled = AutoStartManager::verifyShortcut(linkPath, exePath);
         m_trayManager->setAutoStartChecked(actualEnabled);
 
-        // 用户可见提示
         QMessageBox::warning(qApp->activeWindow(),
             QStringLiteral("开机自启"),
-            QStringLiteral("开机自启设置验证失败（值不匹配或残留），已恢复原值。"));
+            QStringLiteral("开机自启快捷方式验证失败（目标路径不匹配），已恢复原状态。"));
         return;
+    }
+
+    if (!enabled) {
+        // 删除后验证：确保文件已不存在
+        const bool stillThere = AutoStartManager::verifyShortcut(linkPath, exePath);
+        if (stillThere) {
+            AutoStartManager::restoreBackup(linkPath, backup);
+            if (!AutoStartManager::verifyRestore(linkPath, backup)) {
+                qCritical() << "[App] 开机自启快捷方式恢复失败！";
+            }
+
+            const bool actualEnabled = AutoStartManager::verifyShortcut(linkPath, exePath);
+            m_trayManager->setAutoStartChecked(actualEnabled);
+
+            QMessageBox::warning(qApp->activeWindow(),
+                QStringLiteral("开机自启"),
+                QStringLiteral("无法删除开机自启快捷方式，已恢复原状态。"));
+            return;
+        }
     }
 
     // 成功：菜单状态已由 toggled 信号保持，无需额外操作

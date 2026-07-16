@@ -2,14 +2,21 @@
 #include <QTemporaryDir>
 #include <QFile>
 #include <QDir>
+#include <QCoreApplication>
 
 #include "../core/AutoStartManager.h"
 
+// Windows headers for direct IShellLinkW verification in tests
+#include <windows.h>
+#include <shlobj.h>
+#include <shlwapi.h>
+#include <objbase.h>
+
 /**
- * @brief AutoStartTest — 开机自启注册表操作单元测试。
+ * @brief AutoStartTest — 开机自启 Startup 文件夹快捷方式操作单元测试。
  *
- * 使用 QSettings(IniFormat) 写入临时 INI 文件替代真实注册表，
- * 验证 AutoStartManager 命名空间中所有函数的正确行为。
+ * 使用 QTemporaryDir 作为模拟 Startup 目录，不污染真实 shell:startup。
+ * 所有测试需要 COM 支持（通过 initTestCase / cleanupTestCase 管理）。
  */
 class AutoStartTest : public QObject
 {
@@ -19,541 +26,458 @@ private slots:
     void initTestCase();
     void cleanupTestCase();
 
-    // 启用 / 禁用
-    void testEnableAutoStart();
-    void testDisableAutoStart();
-    void testEnableDisableEnable();
-    void testOldPathResidualOnEnable();
-    void testOldPathResidualOnDisable();
+    // 每个测试前后隔离：仅清理临时 Startup 目录中的 DesktopPet.lnk 残留
+    void init();
+    void cleanup();
 
-    // 保存与恢复
-    void testSavePreviousWhenExists();
-    void testSavePreviousWhenNotExists();
-    void testRestorePreviousWhenExisted();
-    void testRestorePreviousWhenNotExisted();
-
-    // 精确验证
-    void testVerifyExactPath();
+    // 基本创建/删除/验证
+    void testCreateShortcut();
+    void testRemoveShortcut();
+    void testVerifyWithWrongPath();
     void testVerifyAbsence();
-    void testVerifyRejectsWrongPath();
 
-    // 恢复验证
-    void testVerifyRestoreWhenExisted();
-    void testVerifyRestoreWhenNotExisted();
+    // 备份与恢复
+    void testBackupAndRestore();
+    void testBackupWhenNoExisting();
+    void testRestoreWhenNoBackup();
 
-    // 错误恢复
-    void testRollbackAfterApplyFailure();
-    void testFullRollbackWithRestoreVerification();
+    // 路径特殊性
+    void testChinesePath();
+    void testSpaceInPath();
+    void testTrailingBackslashInPath();
+
+    // 边界
+    void testRemoveNonExistentIsIdempotent();
+    void testCreateOverwriteExisting();
+    void testFullRollbackCycle();
 
 private:
     QTemporaryDir *m_tempDir = nullptr;
-    QString m_iniPath;
-    QString m_key;
-    QString m_fakeExePath;
+    QString m_startupDir;
+    QString m_shortcutPath;
 
-    QSettings createSettings() const;
+    // 测试用 EXE 路径
+    QString m_exePath;
+    QString m_exeDir;
+    QString m_otherExePath;
+
+    // 创建临时文件模拟的 "EXE"，供 SetPath 使用
+    QString m_fakeExeFilePath;
+
+    /// 直接通过 IShellLinkW 读取 .lnk 目标路径（用于测试 verifyShortcut 的正确性）
+    QString readLinkTargetDirect(const QString &linkPath) const;
+
+    /// 辅助：QString → null 终止的 wchar_t 字符串
+    static inline std::wstring qw(const QString &s) { return s.toStdWString(); }
+
+    /// 辅助：规范化 Windows 路径分隔符（统一为后斜杠），用于比较
+    static inline QString norm(const QString &p) {
+        return QDir::toNativeSeparators(QDir::cleanPath(p));
+    }
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 初始化
+// 初始化 / 清理
 // ═══════════════════════════════════════════════════════════════════════════
 
 void AutoStartTest::initTestCase()
 {
+    // 初始化 COM（单元测试可能没有自动初始化）
+    HRESULT hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+    if (FAILED(hr) && hr != RPC_E_CHANGED_MODE) {
+        QFAIL("CoInitializeEx 失败");
+    }
+
+    // 临时目录作为模拟 Startup 目录
     m_tempDir = new QTemporaryDir();
     QVERIFY(m_tempDir->isValid());
-    m_iniPath = m_tempDir->filePath(QStringLiteral("test_autostart.ini"));
-    m_key = QStringLiteral("DesktopPetTest");
-    m_fakeExePath = QStringLiteral("C:\\Program Files\\DesktopPet\\DesktopPet.exe");
+    m_startupDir = m_tempDir->filePath(QStringLiteral("Startup"));
+    QDir().mkpath(m_startupDir);
+    m_shortcutPath = m_startupDir + QStringLiteral("\\DesktopPet.lnk");
+
+    // 用临时目录下的 fake.exe 作为目标路径
+    m_fakeExeFilePath = m_tempDir->filePath(QStringLiteral("DesktopPet.exe"));
+    {
+        QFile fakeExe(m_fakeExeFilePath);
+        fakeExe.open(QIODevice::WriteOnly);
+        fakeExe.write("FAKE_EXE");
+        fakeExe.close();
+    }
+
+    m_exePath = m_fakeExeFilePath;
+    m_exeDir = m_tempDir->path();
+    m_otherExePath = m_tempDir->filePath(QStringLiteral("OtherPet.exe"));
+    {
+        QFile otherExe(m_otherExePath);
+        otherExe.open(QIODevice::WriteOnly);
+        otherExe.write("OTHER");
+        otherExe.close();
+    }
 }
 
 void AutoStartTest::cleanupTestCase()
 {
+    // cleanup 已在每个测试后执行，此处仅做最终保险清理
+    if (!m_shortcutPath.isEmpty()) {
+        DeleteFileW(qw(m_shortcutPath).c_str());
+        DeleteFileW(qw(m_shortcutPath + QStringLiteral(".backup")).c_str());
+    }
+
     if (m_tempDir) {
         m_tempDir->remove();
         delete m_tempDir;
+        m_tempDir = nullptr;
     }
-}
 
-QSettings AutoStartTest::createSettings() const
-{
-    return QSettings(m_iniPath, QSettings::IniFormat);
+    CoUninitialize();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 启用 / 禁用
+// 每个测试前后隔离
 // ═══════════════════════════════════════════════════════════════════════════
 
-void AutoStartTest::testEnableAutoStart()
+void AutoStartTest::init()
 {
-    // 初始：key 不存在
-    {
-        QSettings reg = createSettings();
-        QVERIFY(!reg.contains(m_key));
-    }
+    // initTestCase 已完成一次性设置，每个测试前无需额外操作
+}
 
-    // 启用
-    {
-        QSettings reg = createSettings();
-        bool ok = AutoStartManager::applyAutoStart(reg, m_key, true, m_fakeExePath);
-        QVERIFY(ok);
-    }
-
-    // 验证：存在且值正确
-    {
-        QSettings reg = createSettings();
-        QVERIFY(reg.contains(m_key));
-        QCOMPARE(reg.value(m_key).toString(),
-                 QStringLiteral("\"%1\"").arg(m_fakeExePath));
-        bool verified = AutoStartManager::verifyAutoStart(reg, m_key, true, m_fakeExePath);
-        QVERIFY(verified);
-    }
-
-    // 清理
-    {
-        QSettings reg = createSettings();
-        reg.remove(m_key);
-        reg.sync();
+void AutoStartTest::cleanup()
+{
+    // 只清理临时 Startup 目录中的测试残留，绝不操作真实 shell:startup
+    if (!m_shortcutPath.isEmpty()) {
+        DeleteFileW(qw(m_shortcutPath).c_str());
+        const QString backupPath = m_shortcutPath + QStringLiteral(".backup");
+        DeleteFileW(qw(backupPath).c_str());
     }
 }
 
-void AutoStartTest::testDisableAutoStart()
+// ═══════════════════════════════════════════════════════════════════════════
+// 工具函数：直接通过 IShellLinkW 读取目标路径
+// ═══════════════════════════════════════════════════════════════════════════
+
+QString AutoStartTest::readLinkTargetDirect(const QString &linkPath) const
 {
-    // 先写入
-    {
-        QSettings reg = createSettings();
-        AutoStartManager::applyAutoStart(reg, m_key, true, m_fakeExePath);
-    }
+    IShellLinkW *psl = nullptr;
+    HRESULT hr = CoCreateInstance(
+        CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+        IID_IShellLinkW, reinterpret_cast<void**>(&psl));
+    if (FAILED(hr)) return {};
 
-    // 禁用
-    {
-        QSettings reg = createSettings();
-        bool ok = AutoStartManager::applyAutoStart(reg, m_key, false, m_fakeExePath);
-        QVERIFY(ok);
-    }
+    IPersistFile *ppf = nullptr;
+    hr = psl->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&ppf));
+    if (FAILED(hr)) { psl->Release(); return {}; }
 
-    // 验证：已删除
-    {
-        QSettings reg = createSettings();
-        QVERIFY(!reg.contains(m_key));
-        bool verified = AutoStartManager::verifyAutoStart(reg, m_key, false, m_fakeExePath);
-        QVERIFY(verified);
-    }
+    hr = ppf->Load(qw(linkPath).c_str(), STGM_READ);
+    ppf->Release();
+    if (FAILED(hr)) { psl->Release(); return {}; }
+
+    WCHAR target[MAX_PATH];
+    hr = psl->GetPath(target, MAX_PATH, nullptr, SLGP_UNCPRIORITY);
+    psl->Release();
+
+    if (FAILED(hr)) return {};
+    return QString::fromWCharArray(target);
 }
 
-void AutoStartTest::testEnableDisableEnable()
+// ═══════════════════════════════════════════════════════════════════════════
+// 基本创建/删除/验证
+// ═══════════════════════════════════════════════════════════════════════════
+
+void AutoStartTest::testCreateShortcut()
 {
-    const QString otherExe = QStringLiteral("D:\\Other\\app.exe");
+    QVERIFY(!PathFileExistsW(qw(m_shortcutPath).c_str()));
 
-    // 启用
-    {
-        QSettings reg = createSettings();
-        QVERIFY(AutoStartManager::applyAutoStart(reg, m_key, true, m_fakeExePath));
-    }
-
-    // 禁用
-    {
-        QSettings reg = createSettings();
-        QVERIFY(AutoStartManager::applyAutoStart(reg, m_key, false, otherExe));
-        QVERIFY(AutoStartManager::verifyAutoStart(reg, m_key, false, otherExe));
-    }
-
-    // 再启用（不同路径）
-    {
-        QSettings reg = createSettings();
-        QVERIFY(AutoStartManager::applyAutoStart(reg, m_key, true, otherExe));
-        QVERIFY(AutoStartManager::verifyAutoStart(reg, m_key, true, otherExe));
-    }
-
-    // 清理
-    {
-        QSettings reg = createSettings();
-        reg.remove(m_key);
-        reg.sync();
-    }
-}
-
-void AutoStartTest::testOldPathResidualOnEnable()
-{
-    // 预置旧路径（同 key，不同值 — 模拟之前安装留下的残留）
-    const QString oldPath = QStringLiteral("\"C:\\Old\\Install\\DesktopPet.exe\"");
-    {
-        QSettings reg = createSettings();
-        reg.setValue(m_key, oldPath);
-        reg.sync();
-    }
-
-    // 保存旧值
-    QSettings reg = createSettings();
-    AutoStartManager::SavedRegValue saved = AutoStartManager::savePrevious(reg, m_key);
-    QVERIFY(saved.existed);
-    QCOMPARE(saved.value, oldPath);
-
-    // 启用（应覆盖为当前 EXE 路径）
-    bool ok = AutoStartManager::applyAutoStart(reg, m_key, true, m_fakeExePath);
+    bool ok = AutoStartManager::createShortcut(m_shortcutPath, m_exePath, m_exeDir);
     QVERIFY(ok);
 
-    // 验证：已更新为新路径（不是旧残留）
-    QVERIFY(reg.value(m_key).toString() != oldPath);
-    QCOMPARE(reg.value(m_key).toString(),
-             QStringLiteral("\"%1\"").arg(m_fakeExePath));
-    QVERIFY(AutoStartManager::verifyAutoStart(reg, m_key, true, m_fakeExePath));
-    QVERIFY(!AutoStartManager::verifyAutoStart(reg, m_key, true,
-               QStringLiteral("C:\\Old\\Install\\DesktopPet.exe")));
+    // 文件存在
+    QVERIFY(PathFileExistsW(qw(m_shortcutPath).c_str()));
 
-    // 恢复原始状态
-    AutoStartManager::restorePrevious(reg, m_key, saved);
-    QCOMPARE(reg.value(m_key).toString(), oldPath);
-    reg.remove(m_key);
-    reg.sync();
+    // 用直接读取验证目标路径（规范化后比较，统一分隔符）
+    const QString actualTarget = readLinkTargetDirect(m_shortcutPath);
+    QCOMPARE(norm(actualTarget), norm(m_exePath));
+
+    // 使用 verifyShortcut 验证
+    QVERIFY(AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
+
+    // 清理
+    QVERIFY(DeleteFileW(qw(m_shortcutPath).c_str()));
 }
 
-void AutoStartTest::testOldPathResidualOnDisable()
+void AutoStartTest::testRemoveShortcut()
 {
-    // 预置旧路径（模拟之前安装残留）
-    const QString oldPath = QStringLiteral("\"C:\\Old\\Install\\DesktopPet.exe\"");
-    {
-        QSettings reg = createSettings();
-        reg.setValue(m_key, oldPath);
-        reg.sync();
-    }
+    // 先创建
+    QVERIFY(AutoStartManager::createShortcut(m_shortcutPath, m_exePath, m_exeDir));
+    QVERIFY(PathFileExistsW(qw(m_shortcutPath).c_str()));
 
-    // 保存旧值
-    QSettings reg = createSettings();
-    AutoStartManager::SavedRegValue saved = AutoStartManager::savePrevious(reg, m_key);
-    QVERIFY(saved.existed);
-    QCOMPARE(saved.value, oldPath);
-
-    // 禁用（应删除 key，无论旧值是什么路径）
-    bool ok = AutoStartManager::applyAutoStart(reg, m_key, false, m_fakeExePath);
+    // 删除
+    bool ok = AutoStartManager::removeShortcut(m_shortcutPath);
     QVERIFY(ok);
 
-    // 验证：key 已删除
-    QVERIFY(!reg.contains(m_key));
-    QVERIFY(AutoStartManager::verifyAutoStart(reg, m_key, false, m_fakeExePath));
-
-    // 恢复原始状态
-    AutoStartManager::restorePrevious(reg, m_key, saved);
-    QCOMPARE(reg.value(m_key).toString(), oldPath);
-    reg.remove(m_key);
-    reg.sync();
+    // 验证已删除
+    QVERIFY(!PathFileExistsW(qw(m_shortcutPath).c_str()));
+    QVERIFY(!AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// 保存与恢复
-// ═══════════════════════════════════════════════════════════════════════════
-
-void AutoStartTest::testSavePreviousWhenExists()
+void AutoStartTest::testVerifyWithWrongPath()
 {
-    const QString oldValue = QStringLiteral("\"C:\\Old\\Path\\old.exe\"");
+    // 创建指向 exePath 的快捷方式
+    QVERIFY(AutoStartManager::createShortcut(m_shortcutPath, m_exePath, m_exeDir));
 
-    // 预置旧值
-    {
-        QSettings reg = createSettings();
-        reg.setValue(m_key, oldValue);
-        reg.sync();
-    }
+    // 用 m_otherExePath 验证应失败
+    QVERIFY(!AutoStartManager::verifyShortcut(m_shortcutPath, m_otherExePath));
 
-    // 保存
-    QSettings reg = createSettings();
-    AutoStartManager::SavedRegValue saved = AutoStartManager::savePrevious(reg, m_key);
-    QVERIFY(saved.existed);
-    QCOMPARE(saved.value, oldValue);
+    // 用正确路径验证应通过
+    QVERIFY(AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
 
     // 清理
-    reg.remove(m_key);
-    reg.sync();
-}
-
-void AutoStartTest::testSavePreviousWhenNotExists()
-{
-    QSettings reg = createSettings();
-    QVERIFY(!reg.contains(m_key));
-
-    AutoStartManager::SavedRegValue saved = AutoStartManager::savePrevious(reg, m_key);
-    QVERIFY(!saved.existed);
-    QVERIFY(saved.value.isEmpty());
-}
-
-void AutoStartTest::testRestorePreviousWhenExisted()
-{
-    const QString oldValue = QStringLiteral("\"C:\\Old\\Path\\old.exe\"");
-
-    // 预置旧值
-    {
-        QSettings reg = createSettings();
-        reg.setValue(m_key, oldValue);
-        reg.sync();
-    }
-
-    // 保存
-    QSettings reg = createSettings();
-    AutoStartManager::SavedRegValue saved = AutoStartManager::savePrevious(reg, m_key);
-
-    // 覆盖
-    reg.setValue(m_key, QStringLiteral("\"%1\"").arg(m_fakeExePath));
-    reg.sync();
-
-    // 恢复
-    AutoStartManager::restorePrevious(reg, m_key, saved);
-
-    // 验证：回到旧值
-    QCOMPARE(reg.value(m_key).toString(), oldValue);
-
-    // 清理
-    reg.remove(m_key);
-    reg.sync();
-}
-
-void AutoStartTest::testRestorePreviousWhenNotExisted()
-{
-    {
-        QSettings reg = createSettings();
-        QVERIFY(!reg.contains(m_key));
-    }
-
-    // 保存（不存在）
-    QSettings reg = createSettings();
-    AutoStartManager::SavedRegValue saved = AutoStartManager::savePrevious(reg, m_key);
-    QVERIFY(!saved.existed);
-
-    // 写入值
-    reg.setValue(m_key, QStringLiteral("\"%1\"").arg(m_fakeExePath));
-    reg.sync();
-
-    // 恢复（应删除）
-    AutoStartManager::restorePrevious(reg, m_key, saved);
-
-    // 验证：已删除
-    QVERIFY(!reg.contains(m_key));
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
-// 精确验证
-// ═══════════════════════════════════════════════════════════════════════════
-
-void AutoStartTest::testVerifyExactPath()
-{
-    QSettings reg = createSettings();
-
-    // 写入带引号的路径
-    QVERIFY(AutoStartManager::applyAutoStart(reg, m_key, true, m_fakeExePath));
-
-    // 正确路径验证通过
-    QVERIFY(AutoStartManager::verifyAutoStart(reg, m_key, true, m_fakeExePath));
-
-    // 值必须精准包含引号
-    const QString withoutQuotes = m_fakeExePath;
-    QVERIFY(reg.value(m_key).toString() != withoutQuotes);
-
-    // 清理
-    reg.remove(m_key);
-    reg.sync();
+    QVERIFY(AutoStartManager::removeShortcut(m_shortcutPath));
 }
 
 void AutoStartTest::testVerifyAbsence()
 {
-    {
-        QSettings reg = createSettings();
-        reg.remove(m_key);
-        reg.sync();
-    }
+    // 文件不存在时 verify 应返回 false
+    QVERIFY(!PathFileExistsW(qw(m_shortcutPath).c_str()));
+    QVERIFY(!AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
 
-    {
-        QSettings reg = createSettings();
-        // 空状态验证通过
-        QVERIFY(AutoStartManager::verifyAutoStart(reg, m_key, false, m_fakeExePath));
-    }
+    // 创建后再验证
+    QVERIFY(AutoStartManager::createShortcut(m_shortcutPath, m_exePath, m_exeDir));
+    QVERIFY(AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
 
-    // 写入再删除
-    {
-        QSettings reg = createSettings();
-        AutoStartManager::applyAutoStart(reg, m_key, true, m_fakeExePath);
-    }
-    {
-        QSettings reg = createSettings();
-        QVERIFY(reg.contains(m_key));
-    }
-    {
-        QSettings reg = createSettings();
-        AutoStartManager::applyAutoStart(reg, m_key, false, m_fakeExePath);
-    }
-    {
-        QSettings reg = createSettings();
-        QVERIFY(!reg.contains(m_key));
-        QVERIFY(AutoStartManager::verifyAutoStart(reg, m_key, false, m_fakeExePath));
-    }
-}
-
-void AutoStartTest::testVerifyRejectsWrongPath()
-{
-    QSettings reg = createSettings();
-
-    const QString wrongPath = QStringLiteral("E:\\Wrong\\app.exe");
-
-    // 写入正确路径
-    QVERIFY(AutoStartManager::applyAutoStart(reg, m_key, true, m_fakeExePath));
-
-    // 用错误路径验证应失败
-    QVERIFY(!AutoStartManager::verifyAutoStart(reg, m_key, true, wrongPath));
-
-    // 用正确路径验证应通过
-    QVERIFY(AutoStartManager::verifyAutoStart(reg, m_key, true, m_fakeExePath));
-
-    reg.remove(m_key);
-    reg.sync();
+    // 删除后再验证
+    QVERIFY(AutoStartManager::removeShortcut(m_shortcutPath));
+    QVERIFY(!AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 恢复验证
+// 备份与恢复
 // ═══════════════════════════════════════════════════════════════════════════
 
-void AutoStartTest::testVerifyRestoreWhenExisted()
+void AutoStartTest::testBackupAndRestore()
 {
-    const QString orig = QStringLiteral("\"C:\\Original\\app.exe\"");
+    // 创建快捷方式 A（指向 m_exePath）
+    QVERIFY(AutoStartManager::createShortcut(m_shortcutPath, m_exePath, m_exeDir));
+    QVERIFY(AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
 
-    // 预置原始值
-    {
-        QSettings reg = createSettings();
-        reg.setValue(m_key, orig);
-        reg.sync();
-    }
+    // 备份
+    AutoStartManager::ShortcutBackup backup =
+        AutoStartManager::backupShortcut(m_shortcutPath);
+    QVERIFY(backup.hadExisting);
+    QVERIFY(!backup.backupFilePath.isEmpty());
+    QVERIFY(PathFileExistsW(qw(backup.backupFilePath).c_str()));
 
-    // 保存
-    QSettings reg = createSettings();
-    auto saved = AutoStartManager::savePrevious(reg, m_key);
+    // 删除 A
+    QVERIFY(AutoStartManager::removeShortcut(m_shortcutPath));
+    QVERIFY(!AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
 
-    // 覆盖
-    reg.setValue(m_key, QStringLiteral("\"%1\"").arg(m_fakeExePath));
-    reg.sync();
+    // 创建快捷方式 B（指向 m_otherExePath）
+    QVERIFY(AutoStartManager::createShortcut(m_shortcutPath, m_otherExePath, m_exeDir));
+    QVERIFY(AutoStartManager::verifyShortcut(m_shortcutPath, m_otherExePath));
 
-    // restorePrevious + verifyRestore
-    AutoStartManager::restorePrevious(reg, m_key, saved);
-    QVERIFY(AutoStartManager::verifyRestore(reg, m_key, saved));
+    // 恢复 → 应变回 A
+    bool restored = AutoStartManager::restoreBackup(m_shortcutPath, backup);
+    QVERIFY(restored);
+    QVERIFY(AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
+    QVERIFY(!AutoStartManager::verifyShortcut(m_shortcutPath, m_otherExePath));
+
+    // 验证恢复结果
+    QVERIFY(AutoStartManager::verifyRestore(m_shortcutPath, backup));
+
+    // 备份文件应已被删除
+    QVERIFY(!PathFileExistsW(qw(backup.backupFilePath).c_str()));
 
     // 清理
-    reg.remove(m_key);
-    reg.sync();
+    QVERIFY(AutoStartManager::removeShortcut(m_shortcutPath));
 }
 
-void AutoStartTest::testVerifyRestoreWhenNotExisted()
+void AutoStartTest::testBackupWhenNoExisting()
 {
-    // 保存（初始不存在）
-    QSettings reg = createSettings();
-    auto saved = AutoStartManager::savePrevious(reg, m_key);
-    QVERIFY(!saved.existed);
+    // 确保不存在
+    QVERIFY(!PathFileExistsW(qw(m_shortcutPath).c_str()));
 
-    // 写入
-    reg.setValue(m_key, QStringLiteral("\"%1\"").arg(m_fakeExePath));
-    reg.sync();
+    // 备份
+    AutoStartManager::ShortcutBackup backup =
+        AutoStartManager::backupShortcut(m_shortcutPath);
+    QVERIFY(!backup.hadExisting);
 
-    // 恢复（应删除）
-    AutoStartManager::restorePrevious(reg, m_key, saved);
+    // 备份文件不应存在
+    if (!backup.backupFilePath.isEmpty()) {
+        QVERIFY(!PathFileExistsW(qw(backup.backupFilePath).c_str()));
+    }
+}
 
-    // 验证恢复
-    QVERIFY(!reg.contains(m_key));
-    QVERIFY(AutoStartManager::verifyRestore(reg, m_key, saved));
+void AutoStartTest::testRestoreWhenNoBackup()
+{
+    // 备份不存在的情况
+    AutoStartManager::ShortcutBackup backup;
+    backup.hadExisting = true; // 声称原来有
+    backup.backupFilePath = m_tempDir->filePath(QStringLiteral("nonexistent.backup"));
+
+    // 尝试恢复（备份文件不存在 → 应失败）
+    bool restored = AutoStartManager::restoreBackup(m_shortcutPath, backup);
+    QVERIFY(!restored);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 错误恢复
+// 路径特殊性
 // ═══════════════════════════════════════════════════════════════════════════
 
-void AutoStartTest::testRollbackAfterApplyFailure()
+void AutoStartTest::testChinesePath()
 {
-    // 该测试模拟"应用失败后恢复原值"模式。
-    // 使用文件式 QSettings（IniFormat）时 QSettings::status 通常不会出错，
-    // 所以我们模拟完整的安全操作序列。
-
-    const QString oldValue = QStringLiteral("\"C:\\Production\\pet.exe\"");
-
-    // 预置旧值
+    // 在临时目录下创建包含中文路径的假的 "EXE"
+    const QString chineseDir = m_tempDir->filePath(QStringLiteral("桌面宠物"));
+    QDir().mkpath(chineseDir);
+    const QString chineseExePath = chineseDir + QStringLiteral("\\DesktopPet.exe");
     {
-        QSettings reg = createSettings();
-        reg.setValue(m_key, oldValue);
-        reg.sync();
+        QFile fakeExe(chineseExePath);
+        fakeExe.open(QIODevice::WriteOnly);
+        fakeExe.write("FAKE");
+        fakeExe.close();
     }
 
-    // (1) 保存原值
-    QSettings reg = createSettings();
-    AutoStartManager::SavedRegValue saved = AutoStartManager::savePrevious(reg, m_key);
-    QVERIFY(saved.existed);
-    QCOMPARE(saved.value, oldValue);
+    // 创建快捷方式
+    const QString chineseLinkPath = m_startupDir + QStringLiteral("\\DesktopPet_中文.lnk");
+    bool ok = AutoStartManager::createShortcut(chineseLinkPath, chineseExePath, chineseDir);
+    QVERIFY(ok);
 
-    // (2) 模拟"启用自启"
-    const bool applied = AutoStartManager::applyAutoStart(reg, m_key, true, m_fakeExePath);
-    QVERIFY(applied);
+    // 验证
+    QVERIFY(AutoStartManager::verifyShortcut(chineseLinkPath, chineseExePath));
 
-    // (3) 模拟"验证失败"→ 恢复
-    AutoStartManager::restorePrevious(reg, m_key, saved);
+    // 直接读取验证
+    const QString actualTarget = readLinkTargetDirect(chineseLinkPath);
+    QCOMPARE(norm(actualTarget), norm(chineseExePath));
 
-    // 验证：恢复到旧值
-    QCOMPARE(reg.value(m_key).toString(), oldValue);
-    QVERIFY(AutoStartManager::verifyRestore(reg, m_key, saved));
-
-    reg.remove(m_key);
-    reg.sync();
+    // 删除
+    QVERIFY(AutoStartManager::removeShortcut(chineseLinkPath));
+    QVERIFY(!AutoStartManager::verifyShortcut(chineseLinkPath, chineseExePath));
 }
 
-void AutoStartTest::testFullRollbackWithRestoreVerification()
+void AutoStartTest::testSpaceInPath()
 {
-    // 完整模拟 App::handleAutoStartToggle 中验证失败后的回滚路径
-
-    const QString oldValue = QStringLiteral("\"C:\\Production\\pet.exe\"");
-
-    // 预置旧值
+    // 在临时目录下创建包含空格的假的 "EXE"
+    const QString spacedDir = m_tempDir->filePath(QStringLiteral("My Desktop Pet"));
+    QDir().mkpath(spacedDir);
+    const QString spacedExePath = spacedDir + QStringLiteral("\\DesktopPet.exe");
     {
-        QSettings reg = createSettings();
-        reg.setValue(m_key, oldValue);
-        reg.sync();
+        QFile fakeExe(spacedExePath);
+        fakeExe.open(QIODevice::WriteOnly);
+        fakeExe.write("FAKE");
+        fakeExe.close();
     }
 
-    // === 模拟启用自启 (enabled=true) ===
+    // 创建快捷方式（路径带空格）
+    const QString spacedLinkPath = m_startupDir + QStringLiteral("\\My Desktop Pet.lnk");
+    bool ok = AutoStartManager::createShortcut(spacedLinkPath, spacedExePath, spacedDir);
+    QVERIFY(ok);
 
-    // (1) savePrevious
-    QSettings reg1 = createSettings();
-    auto saved = AutoStartManager::savePrevious(reg1, m_key);
-    QVERIFY(saved.existed);
-    QCOMPARE(saved.value, oldValue);
+    // 验证
+    QVERIFY(AutoStartManager::verifyShortcut(spacedLinkPath, spacedExePath));
 
-    // (2) applyAutoStart — 模拟写入新路径
-    QVERIFY(AutoStartManager::applyAutoStart(reg1, m_key, true, m_fakeExePath));
-    QVERIFY(AutoStartManager::verifyAutoStart(reg1, m_key, true, m_fakeExePath));
+    // 直接读取验证
+    const QString actualTarget = readLinkTargetDirect(spacedLinkPath);
+    QCOMPARE(norm(actualTarget), norm(spacedExePath));
 
-    // (3) 模拟验证失败 → 恢复
-    QSettings reg2 = createSettings();  // 新实例模拟验证时的重新读取
-    AutoStartManager::restorePrevious(reg2, m_key, saved);
-    QVERIFY(AutoStartManager::verifyRestore(reg2, m_key, saved));
+    // 删除
+    QVERIFY(AutoStartManager::removeShortcut(spacedLinkPath));
+    QVERIFY(!AutoStartManager::verifyShortcut(spacedLinkPath, spacedExePath));
+}
 
-    // (4) 根据真实注册表状态设置菜单
-    const bool actualEnabled = AutoStartManager::verifyAutoStart(reg2, m_key, true, m_fakeExePath);
-    // 恢复后不应为启用状态（除非恢复后的值恰好等于当前 EXE 路径）
-    if (oldValue == QStringLiteral("\"%1\"").arg(m_fakeExePath)) {
-        QVERIFY(actualEnabled);
-    } else {
-        QVERIFY(!actualEnabled);
-    }
+void AutoStartTest::testTrailingBackslashInPath()
+{
+    // 验证路径末尾带反斜杠时仍然正常工作
+    const QString exeDirWithSlash = m_exeDir + QStringLiteral("\\");
+    QVERIFY(AutoStartManager::createShortcut(m_shortcutPath, m_exePath, exeDirWithSlash));
+    QVERIFY(AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
+    QVERIFY(AutoStartManager::removeShortcut(m_shortcutPath));
+}
 
-    // === 模拟禁用自启 (enabled=false) ===
+// ═══════════════════════════════════════════════════════════════════════════
+// 边界
+// ═══════════════════════════════════════════════════════════════════════════
 
-    // (1) savePrevious
-    auto saved2 = AutoStartManager::savePrevious(reg2, m_key);
-    QVERIFY(saved2.existed);
+void AutoStartTest::testRemoveNonExistentIsIdempotent()
+{
+    // 文件不存在时 remove 应返回 true（幂等）
+    QVERIFY(!PathFileExistsW(qw(m_shortcutPath).c_str()));
+    QVERIFY(AutoStartManager::removeShortcut(m_shortcutPath));
+}
 
-    // (2) 禁用（删除）
-    QVERIFY(AutoStartManager::applyAutoStart(reg2, m_key, false, m_fakeExePath));
-    QVERIFY(!reg2.contains(m_key));
+void AutoStartTest::testCreateOverwriteExisting()
+{
+    // 创建指向 m_exePath 的快捷方式
+    QVERIFY(AutoStartManager::createShortcut(m_shortcutPath, m_exePath, m_exeDir));
+    QVERIFY(AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
 
-    // (3) 模拟验证失败 → 恢复
-    AutoStartManager::restorePrevious(reg2, m_key, saved2);
-    QVERIFY(AutoStartManager::verifyRestore(reg2, m_key, saved2));
+    // 覆盖创建指向 m_otherExePath 的快捷方式
+    QVERIFY(AutoStartManager::createShortcut(m_shortcutPath, m_otherExePath, m_exeDir));
 
-    // (4) 真实状态：验证恢复后的值就是旧值
-    QCOMPARE(reg2.value(m_key).toString(), oldValue);
+    // 验证已更新
+    QVERIFY(AutoStartManager::verifyShortcut(m_shortcutPath, m_otherExePath));
+    QVERIFY(!AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
+
+    // 直接读取验证
+    const QString actualTarget = readLinkTargetDirect(m_shortcutPath);
+    QCOMPARE(norm(actualTarget), norm(m_otherExePath));
 
     // 清理
-    reg2.remove(m_key);
-    reg2.sync();
+    QVERIFY(AutoStartManager::removeShortcut(m_shortcutPath));
+}
+
+void AutoStartTest::testFullRollbackCycle()
+{
+    // 模拟完整的使用场景：
+    // 1. 原状态：快捷方式指向 m_exePath
+    QVERIFY(AutoStartManager::createShortcut(m_shortcutPath, m_exePath, m_exeDir));
+
+    // 2. 备份
+    AutoStartManager::ShortcutBackup backup =
+        AutoStartManager::backupShortcut(m_shortcutPath);
+    QVERIFY(backup.hadExisting);
+
+    // 3. "启用"失败 → 恢复（模拟：创建一个仅备份后立即恢复的周期）
+    //    这里我们模拟 createShortcut 成功但后面验证失败 → 恢复的场景
+
+    // 3a. 创建指向另一个路径 → 模拟"切换"
+    QVERIFY(AutoStartManager::createShortcut(m_shortcutPath, m_otherExePath, m_exeDir));
+    QVERIFY(AutoStartManager::verifyShortcut(m_shortcutPath, m_otherExePath));
+
+    // 3b. "验证失败" → 恢复
+    bool restored = AutoStartManager::restoreBackup(m_shortcutPath, backup);
+    QVERIFY(restored);
+
+    // 3c. 验证恢复
+    QVERIFY(AutoStartManager::verifyRestore(m_shortcutPath, backup));
+    QVERIFY(AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
+    QVERIFY(!AutoStartManager::verifyShortcut(m_shortcutPath, m_otherExePath));
+
+    // 4. 模拟"禁用"场景
+    // 4a. 备份
+    AutoStartManager::ShortcutBackup backup2 =
+        AutoStartManager::backupShortcut(m_shortcutPath);
+    QVERIFY(backup2.hadExisting);
+
+    // 4b. 删除（模拟禁用）
+    QVERIFY(AutoStartManager::removeShortcut(m_shortcutPath));
+
+    // 4c. "验证失败"（模拟：文件还在但我们要验证它不存在，但它确实不存在，
+    //     所以这个不会触发失败。我们模拟 "验证说文件还在" 的情况）
+    //     这里直接验证文件已不存在
+    QVERIFY(!AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
+
+    // 4d. 恢复（模拟禁用操作失败后的回滚）
+    bool restored2 = AutoStartManager::restoreBackup(m_shortcutPath, backup2);
+    QVERIFY(restored2);
+    QVERIFY(AutoStartManager::verifyShortcut(m_shortcutPath, m_exePath));
+
+    // 最终状态：恢复到 m_exePath
+    QVERIFY(AutoStartManager::verifyRestore(m_shortcutPath, backup2));
+
+    // 清理
+    QVERIFY(AutoStartManager::removeShortcut(m_shortcutPath));
+
+    // 验证原备份文件的备份文件已被删除
+    const QString backupFilePath = m_shortcutPath + QStringLiteral(".backup");
+    QVERIFY(!PathFileExistsW(qw(backupFilePath).c_str()));
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

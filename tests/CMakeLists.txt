@@ -441,6 +441,25 @@ target_link_libraries(test_autostart PRIVATE
     Qt6::Core
 )
 
+if(WIN32)
+    target_link_libraries(test_autostart PRIVATE
+        ole32
+        shell32
+        shlwapi
+    )
+
+    add_custom_command(TARGET test_autostart POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Core>"
+            "$<TARGET_FILE_DIR:test_autostart>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Test>"
+            "$<TARGET_FILE_DIR:test_autostart>"
+        COMMENT "Deploying Qt6 runtime DLLs for test_autostart"
+        VERBATIM
+    )
+endif()
+
 add_test(NAME test_autostart
     COMMAND test_autostart
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
