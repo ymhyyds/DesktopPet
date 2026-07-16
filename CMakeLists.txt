@@ -185,21 +185,31 @@ install(TARGETS DesktopPet
 
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/characters
     DESTINATION .
+    PATTERN "xiaoyue" EXCLUDE
+    PATTERN "纳西妲l2d" EXCLUDE
 )
 
 install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/database
     DESTINATION .
 )
 
-# 开发期方便：构建完成后自动把 characters/ 和 database/ 同步到输出目录，
-# 这样不用 install 也能直接在 build 目录里跑起来调试。
+# 发布版只包含 Hiyori、Mao、Wanko 三个角色包，
+# xiaoyue 和 纳西妲l2d 保留在源码树但不出现在输出目录中。
 add_custom_command(TARGET DesktopPet POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-        ${CMAKE_CURRENT_SOURCE_DIR}/characters
+    COMMAND ${CMAKE_COMMAND} -E make_directory
         $<TARGET_FILE_DIR:DesktopPet>/characters
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/characters/Hiyori
+        $<TARGET_FILE_DIR:DesktopPet>/characters/Hiyori
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/characters/Mao
+        $<TARGET_FILE_DIR:DesktopPet>/characters/Mao
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/characters/Wanko
+        $<TARGET_FILE_DIR:DesktopPet>/characters/Wanko
     COMMAND ${CMAKE_COMMAND} -E make_directory
         $<TARGET_FILE_DIR:DesktopPet>/database
-    COMMENT "Syncing characters/ and database/ to output directory"
+    COMMENT "Syncing characters (Hiyori/Mao/Wanko) and database to output directory"
 )
 
 # Windows 下用 windeployqt 拷依赖 dll 的便捷 target（手动调用：cmake --build . --target deploy）

@@ -229,19 +229,19 @@ bool App::initialize()
     // ---------------------------------------------------------------
     m_characterLoader = std::make_unique<CharacterLoader>();
     // 角色目录的两种可能位置：
-    //   1. 项目源码中的 characters/（用户加模型的地方）
-    //   2. build/Release/characters/（CMake 编译时同步过去的）
-    // 优先用源码目录，这样用户添加新模型后不用重新编译
+    //   1. 部署目录：exe 同目录下的 characters/（优先，windeployqt/手动打包时放置）
+    //   2. 项目源码中的 characters/（开发阶段回退）
+    // 优先从 applicationDirPath 加载，确保部署后不依赖源码树路径。
     {
-        // 源码路径：从 exe 位置推算（exe 在 build/Release/ 下，源码在两级上级）
-        QDir srcPath(QCoreApplication::applicationDirPath());
-        srcPath.cdUp(); // build/
-        srcPath.cdUp(); // 项目根目录
-        m_charactersPath = srcPath.absoluteFilePath(QStringLiteral("characters"));
+        // 部署路径：exe 同目录
+        m_charactersPath = QCoreApplication::applicationDirPath()
+                         + QStringLiteral("/characters");
         if (!QDir(m_charactersPath).exists()) {
-            // 回退：exe 同目录下的 characters/（CMake 同步的）
-            m_charactersPath = QCoreApplication::applicationDirPath()
-                             + QStringLiteral("/characters");
+            // 回退：源码路径（开发阶段，从 build/ 目录运行）
+            QDir srcPath(QCoreApplication::applicationDirPath());
+            srcPath.cdUp(); // build/
+            srcPath.cdUp(); // 项目根目录
+            m_charactersPath = srcPath.absoluteFilePath(QStringLiteral("characters"));
         }
         qInfo() << "[App] 角色目录：" << m_charactersPath;
     }
