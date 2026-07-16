@@ -445,3 +445,89 @@ add_test(NAME test_autostart
     COMMAND test_autostart
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# ── 单实例保护测试 ──
+# Tests first-acquire / second-reject / release-and-reacquire / activation signal.
+# Uses unique pipe names per test case (no cross-test interference).
+# Requires Qt6::Network for QLocalServer/QLocalSocket.
+# Uses QTEST_GUILESS_MAIN (QCoreApplication) — no qwindows platform plugin needed.
+
+add_executable(test_single_instance
+    ${CMAKE_CURRENT_SOURCE_DIR}/SingleInstanceTest.cpp
+    ${CMAKE_SOURCE_DIR}/core/SingleInstanceManager.cpp
+)
+
+set_target_properties(test_single_instance PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_single_instance PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/core
+)
+
+target_link_libraries(test_single_instance PRIVATE
+    Qt6::Test
+    Qt6::Core
+    Qt6::Network
+)
+
+# 部署 Qt6::Core, Qt6::Network, Qt6::Test 运行时 DLL 到测试 exe 输出目录，
+# 使用生成器表达式，不硬编码路径或 Debug/Release 名称。
+if(WIN32)
+    add_custom_command(TARGET test_single_instance POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Core>"
+            "$<TARGET_FILE_DIR:test_single_instance>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Network>"
+            "$<TARGET_FILE_DIR:test_single_instance>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Test>"
+            "$<TARGET_FILE_DIR:test_single_instance>"
+        COMMENT "Deploying Qt6 runtime DLLs for test_single_instance"
+        VERBATIM
+    )
+endif()
+
+add_test(NAME test_single_instance
+    COMMAND test_single_instance
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+# ── 单实例竞争测试辅助程序 ──
+# 被 test_single_instance 通过 QProcess 调用，模拟两个进程同时启动。
+# 使用自己的 main() + QCoreApplication.
+
+add_executable(concurrent_race_helper
+    ${CMAKE_CURRENT_SOURCE_DIR}/concurrent_race_helper.cpp
+    ${CMAKE_SOURCE_DIR}/core/SingleInstanceManager.cpp
+)
+
+set_target_properties(concurrent_race_helper PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(concurrent_race_helper PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/core
+)
+
+target_link_libraries(concurrent_race_helper PRIVATE
+    Qt6::Core
+    Qt6::Network
+)
+
+# 部署 Qt6::Core, Qt6::Network 运行时 DLL
+if(WIN32)
+    add_custom_command(TARGET concurrent_race_helper POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Core>"
+            "$<TARGET_FILE_DIR:concurrent_race_helper>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Network>"
+            "$<TARGET_FILE_DIR:concurrent_race_helper>"
+        COMMENT "Deploying Qt6 runtime DLLs for concurrent_race_helper"
+        VERBATIM
+    )
+endif()

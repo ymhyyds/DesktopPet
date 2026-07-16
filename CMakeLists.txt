@@ -43,6 +43,8 @@ set(CORE_SOURCES
     core/AutoStartManager.h
     core/GlobalHotkeyManager.cpp
     core/GlobalHotkeyManager.h
+    core/SingleInstanceManager.cpp
+    core/SingleInstanceManager.h
     core/WeatherManager.cpp
     core/WeatherManager.h
     core/WindowManager.cpp
