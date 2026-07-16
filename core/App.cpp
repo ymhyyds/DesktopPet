@@ -470,6 +470,7 @@ bool App::initialize()
         if (!m_styleSummaryInProgress) return;
 
         m_styleSummaryInProgress = false;
+        m_aiClient->cancelSummary();  // 取消底层 HTTP 请求，避免迟到结果
 
         const QStringList userMessages = extractFallbackUserMessages(m_immutableHistorySnapshot);
         m_promptManager->completeStyleTransitionWithFallback(m_pendingStylePrompt, userMessages);
@@ -1202,7 +1203,9 @@ bool App::switchCharacter(const QString &characterName)
         return true;
     }
 
-    // 角色切换：停止任何进行中的风格切换
+    // 角色切换：取消任何在途网络请求并停止风格切换
+    m_aiClient->cancelMessage();
+    m_aiClient->cancelSummary();
     m_summaryTimer->stop();
     m_chatWindow->clearTransientStatus();
     m_pendingStylePrompt.clear();

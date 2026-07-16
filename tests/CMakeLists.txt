@@ -67,6 +67,12 @@ configure_file(
 )
 
 configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/MockDeepSeekServer.py
+    ${CMAKE_CURRENT_BINARY_DIR}/MockDeepSeekServer.py
+    COPYONLY
+)
+
+configure_file(
     ${CMAKE_CURRENT_SOURCE_DIR}/MockWeatherServer.py
     ${CMAKE_CURRENT_BINARY_DIR}/MockWeatherServer.py
     COPYONLY
@@ -87,6 +93,9 @@ add_custom_command(TARGET test_tts POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_if_different
         "${CMAKE_CURRENT_SOURCE_DIR}/MockWeatherServer.py"
         "$<TARGET_FILE_DIR:test_tts>/MockWeatherServer.py"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/MockDeepSeekServer.py"
+        "$<TARGET_FILE_DIR:test_tts>/MockDeepSeekServer.py"
 )
 
 # Deploy Qt6Multimedia runtime DLL so test_tts can load it
@@ -358,5 +367,53 @@ target_link_libraries(test_motion_lifecycle PRIVATE
 
 add_test(NAME test_motion_lifecycle
     COMMAND test_motion_lifecycle
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+# ── DeepSeekClient 网络超时与错误恢复 ──
+# Standalone test executable (NOT part of test_tts).
+# Uses MockDeepSeekServer.py to avoid real network requests.
+
+add_executable(test_ds_network
+    ${CMAKE_CURRENT_SOURCE_DIR}/run_network_tests.cpp
+    ${CMAKE_SOURCE_DIR}/ai/DeepSeekClient.cpp
+)
+
+set_target_properties(test_ds_network PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_ds_network PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/ai
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(test_ds_network PRIVATE
+    Qt6::Test
+    Qt6::Core
+    Qt6::Network
+    Qt6::Gui
+    Qt6::Widgets
+)
+
+# Copy MockDeepSeekServer.py to build directory
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/MockDeepSeekServer.py
+    ${CMAKE_CURRENT_BINARY_DIR}/MockDeepSeekServer.py
+    COPYONLY
+)
+
+# Also copy to executable output directory
+add_custom_command(TARGET test_ds_network POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/MockDeepSeekServer.py"
+        "$<TARGET_FILE_DIR:test_ds_network>/MockDeepSeekServer.py"
+    COMMENT "Copying MockDeepSeekServer.py for test_ds_network"
+    VERBATIM
+)
+
+add_test(NAME test_ds_network
+    COMMAND test_ds_network
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )

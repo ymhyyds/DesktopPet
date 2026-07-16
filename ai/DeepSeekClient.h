@@ -9,6 +9,7 @@
 
 class QNetworkAccessManager;
 class QNetworkReply;
+class QTimer;
 
 /**
  * @brief DeepSeekClient 封装对 DeepSeek Chat Completion API 的调用。
@@ -21,6 +22,12 @@ class QNetworkReply;
  *  3. （向后兼容）旧程序目录下的 deepseek_api_key.txt
  * Key 持久化使用 QSaveFile 原子写入，空 Key 时自动删除持久化文件。
  * 强烈建议不要把 API Key 硬编码进源码。
+ *
+ * 超时与取消：
+ *  - sendMessage / sendSummaryRequest 各有 30 秒总时限（QTimer + setTransferTimeout 双重保护）。
+ *  - 超时时自动终止请求并发射错误信号。
+ *  - cancelMessage() / cancelSummary() 可主动取消，不发射错误信号。
+ *  - 请求结束后自动清理计时器，防止 error / finished / 流式错误重复终结。
  */
 class DeepSeekClient : public QObject
 {
@@ -49,6 +56,14 @@ public:
      */
     void sendSummaryRequest(const QList<ChatMessage> &conversationHistory, const QString &requestId);
 
+    /// 取消正在进行的消息请求（不触发 errorOccurred 信号）。
+    void cancelMessage();
+    /// 取消正在进行的摘要请求（不触发 summaryFailed 信号）。
+    void cancelSummary();
+
+    /// 设置请求超时毫秒数（默认 30000，仅用于测试覆写）。
+    void setRequestTimeoutMs(int ms) { m_timeoutMs = ms; }
+
 signals:
     /// 流式输出中间结果（每次收到一个 delta 片段时触发）。
     void partialReply(const QString &text);
@@ -69,6 +84,12 @@ private:
     void handleNetworkReply(QNetworkReply *reply);
     void handleStreamData(QNetworkReply *reply);
 
+    /// 超时触发时调用（由 m_requestTimer 触发）。
+    void onRequestTimeout();
+
+    /// 清理请求相关状态，停止计时器，重置标志。
+    void cleanupRequest();
+
 private:
     QNetworkAccessManager *m_networkManager = nullptr;
     QString m_apiKey;
@@ -78,4 +99,12 @@ private:
     // 流式输出缓冲区
     QByteArray m_streamBuffer;
     QString m_fullReply;
+
+    // ──── 超时与取消 ────
+    QTimer    *m_requestTimer    = nullptr;
+    QNetworkReply *m_activeReply = nullptr;
+    int        m_timeoutMs       = 30000;
+    bool       m_timedOut        = false;
+    bool       m_cancelled       = false;
+    bool       m_isSummaryRequest = false;
 };
