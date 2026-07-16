@@ -39,6 +39,8 @@ find_package(SQLite3 QUIET)
 set(CORE_SOURCES
     core/App.cpp
     core/App.h
+    core/AutoStartManager.cpp
+    core/AutoStartManager.h
     core/GlobalHotkeyManager.cpp
     core/GlobalHotkeyManager.h
     core/WeatherManager.cpp

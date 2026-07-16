@@ -115,6 +115,9 @@ private:
     bool isSmallWindowOverFullscreenHost(HWND foreground, HWND fullscreenHost) const;
 #endif
 
+    /// 开机自启切换：安全操作（备份 → 写入/删除 → sync → 验证 → 失败恢复）。
+    void handleAutoStartToggle(bool enabled);
+
 private:
     // ──── 外部全屏权威状态（App 唯一管理） ────
 #ifdef Q_OS_WIN

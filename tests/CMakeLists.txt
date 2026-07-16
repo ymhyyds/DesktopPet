@@ -417,3 +417,31 @@ add_test(NAME test_ds_network
     COMMAND test_ds_network
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+# ── AutoStart 注册表操作安全封装 ──
+# Pure logic tests using QSettings(IniFormat) — no real registry access.
+# Tests savePrevious, applyAutoStart, verifyAutoStart, restorePrevious.
+
+add_executable(test_autostart
+    ${CMAKE_CURRENT_SOURCE_DIR}/AutoStartTest.cpp
+    ${CMAKE_SOURCE_DIR}/core/AutoStartManager.cpp
+)
+
+set_target_properties(test_autostart PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_autostart PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/core
+)
+
+target_link_libraries(test_autostart PRIVATE
+    Qt6::Test
+    Qt6::Core
+)
+
+add_test(NAME test_autostart
+    COMMAND test_autostart
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)

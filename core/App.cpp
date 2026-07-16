@@ -23,10 +23,12 @@
 #include "WeatherManager.h"
 #include "GlobalHotkeyManager.h"
 #include "BedtimeHelper.h"
+#include "AutoStartManager.h"
 
 #include <memory>
 
 #include <QApplication>
+#include <QMessageBox>
 
 #ifdef Q_OS_WIN
 #include <windows.h>
@@ -732,22 +734,7 @@ void App::setupConnections()
             this, &App::quit);
 
     connect(m_trayManager.get(), &TrayManager::autoStartToggled,
-            this, [](bool enabled) {
-#ifdef Q_OS_WIN
-                QSettings reg(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
-                              QSettings::NativeFormat);
-                const QString appName = QApplication::applicationName();
-                if (enabled) {
-                    const QString exePath = QApplication::applicationFilePath().replace('/', '\\');
-                    reg.setValue(appName, QStringLiteral("\"%1\"").arg(exePath));
-                } else {
-                    reg.remove(appName);
-                }
-#else
-                Q_UNUSED(enabled);
-                qWarning() << "[App] 当前平台暂未实现开机自启";
-#endif
-            });
+            this, &App::handleAutoStartToggle);
 
     connect(m_trayManager.get(), &TrayManager::settingsRequested,
             this, [this]() {
@@ -1225,6 +1212,76 @@ bool App::switchCharacter(const QString &characterName)
 
     qInfo() << "[App] 已切换角色为：" << characterName;
     return true;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 开机自启 — 安全操作
+// ═══════════════════════════════════════════════════════════════════════════
+
+void App::handleAutoStartToggle(bool enabled)
+{
+#ifdef Q_OS_WIN
+    const QString kRegPath = QStringLiteral(
+        "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    const QString appName = QApplication::applicationName();
+    const QString exePath = QApplication::applicationFilePath().replace('/', '\\');
+
+    // (1) 保存原注册表值及是否存在
+    QSettings reg(kRegPath, QSettings::NativeFormat);
+    const AutoStartManager::SavedRegValue saved = AutoStartManager::savePrevious(reg, appName);
+
+    // (2) 执行写入/删除
+    const bool applied = AutoStartManager::applyAutoStart(reg, appName, enabled, exePath);
+    if (!applied) {
+        // 写入/删除 + sync 失败 → 恢复原值
+        AutoStartManager::restorePrevious(reg, appName, saved);
+
+        // 验证恢复结果
+        QSettings restoreVerify(kRegPath, QSettings::NativeFormat);
+        if (!AutoStartManager::verifyRestore(restoreVerify, appName, saved)) {
+            qCritical() << "[App] 开机自启注册表恢复失败！";
+        }
+
+        // 根据真实注册表状态设置菜单（精确比较当前 EXE 路径）
+        const bool actualEnabled = AutoStartManager::verifyAutoStart(restoreVerify, appName, true, exePath);
+        m_trayManager->setAutoStartChecked(actualEnabled);
+
+        // 用户可见提示
+        QMessageBox::warning(qApp->activeWindow(),
+            QStringLiteral("开机自启"),
+            QStringLiteral("无法写入开机自启注册表，已恢复原值。\n"
+                           "请检查权限或防病毒软件设置。"));
+        return;
+    }
+
+    // (3) 精确验证写入值或删除结果
+    QSettings verifyReg(kRegPath, QSettings::NativeFormat);
+    const bool verified = AutoStartManager::verifyAutoStart(verifyReg, appName, enabled, exePath);
+    if (!verified) {
+        // 验证失败 → 恢复原值
+        AutoStartManager::restorePrevious(reg, appName, saved);
+
+        // 验证恢复结果
+        if (!AutoStartManager::verifyRestore(verifyReg, appName, saved)) {
+            qCritical() << "[App] 开机自启注册表恢复失败！";
+        }
+
+        // 根据真实注册表状态设置菜单（精确比较当前 EXE 路径）
+        const bool actualEnabled = AutoStartManager::verifyAutoStart(verifyReg, appName, true, exePath);
+        m_trayManager->setAutoStartChecked(actualEnabled);
+
+        // 用户可见提示
+        QMessageBox::warning(qApp->activeWindow(),
+            QStringLiteral("开机自启"),
+            QStringLiteral("开机自启设置验证失败（值不匹配或残留），已恢复原值。"));
+        return;
+    }
+
+    // 成功：菜单状态已由 toggled 信号保持，无需额外操作
+#else
+    Q_UNUSED(enabled);
+    qWarning() << "[App] 当前平台暂未实现开机自启";
+#endif
 }
 
 void App::takeScreenshot()

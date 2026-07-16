@@ -38,6 +38,9 @@ public:
     void rebuildCharacterList(const QStringList &availableCharacters,
                               const QString &currentCharacter);
 
+    /// 安全设置开机自启菜单勾选状态（使用 QSignalBlocker 避免递归触发 autoStartToggled）。
+    void setAutoStartChecked(bool checked);
+
 signals:
     void openChatRequested();
     void switchCharacterRequested(const QString &characterName);

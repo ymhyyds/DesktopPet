@@ -8,6 +8,7 @@
 #include <QStyle>
 #include <QSettings>
 #include <QIcon>
+#include <QSignalBlocker>
 #include <QDebug>
 
 TrayManager::TrayManager(const QStringList &availableCharacters,
@@ -83,10 +84,15 @@ void TrayManager::buildMenu(const QStringList &availableCharacters, const QStrin
     m_autoStartAction->setCheckable(true);
 
 #ifdef Q_OS_WIN
-    // 读取当前是否已经在注册表 Run 项里登记，初始化勾选状态
+    // 精确比较注册表值与当前带引号的 EXE 路径（旧路径残留时不勾选）
     QSettings autoStartReg(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run"),
                             QSettings::NativeFormat);
-    m_autoStartAction->setChecked(autoStartReg.contains(QApplication::applicationName()));
+    const QString autoAppName = QApplication::applicationName();
+    const QString autoExePath = QApplication::applicationFilePath().replace('/', '\\');
+    const bool autoStartMatches = autoStartReg.contains(autoAppName)
+        && autoStartReg.value(autoAppName).toString()
+            == QStringLiteral("\"%1\"").arg(autoExePath);
+    m_autoStartAction->setChecked(autoStartMatches);
 #endif
 
     connect(m_autoStartAction, &QAction::toggled, this, &TrayManager::autoStartToggled);
@@ -109,6 +115,13 @@ void TrayManager::setActiveCharacter(const QString &characterName)
     for (QAction *action : m_characterActionGroup->actions()) {
         action->setChecked(action->text() == characterName);
     }
+}
+
+void TrayManager::setAutoStartChecked(bool checked)
+{
+    if (!m_autoStartAction) return;
+    QSignalBlocker blocker(m_autoStartAction);
+    m_autoStartAction->setChecked(checked);
 }
 
 void TrayManager::rebuildCharacterList(const QStringList &availableCharacters,
