@@ -9,7 +9,10 @@
 #include <QJsonParseError>
 #include <QProcessEnvironment>
 #include <QFile>
+#include <QSaveFile>
 #include <QTextStream>
+#include <QStandardPaths>
+#include <QDir>
 #include <QDebug>
 
 DeepSeekClient::DeepSeekClient(QObject *parent)
@@ -22,9 +25,18 @@ DeepSeekClient::DeepSeekClient(QObject *parent)
         m_apiKey = loadApiKeyFromFileFallback();
     }
 
+    // 向后兼容：旧程序目录下的 deepseek_api_key.txt
+    if (m_apiKey.isEmpty()) {
+        QFile oldFile(QStringLiteral("deepseek_api_key.txt"));
+        if (oldFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream stream(&oldFile);
+            m_apiKey = stream.readLine().trimmed();
+        }
+    }
+
     if (m_apiKey.isEmpty()) {
         qWarning() << "[DeepSeekClient] 未配置 API Key，请设置环境变量 DEEPSEEK_API_KEY，"
-                       "或在程序运行目录下创建 deepseek_api_key.txt 文件。";
+                       "或在设置界面填写保存。";
     }
 }
 
@@ -32,28 +44,69 @@ DeepSeekClient::~DeepSeekClient() = default;
 
 QString DeepSeekClient::loadApiKeyFromFileFallback() const
 {
-    QFile file(QStringLiteral("deepseek_api_key.txt"));
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return QString();
-    }
+    const QString filePath = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)
+        + QStringLiteral("/deepseek_api_key.txt");
+    QFile file(filePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return {};
     QTextStream stream(&file);
-    const QString key = stream.readLine().trimmed();
-    file.close();
-    return key;
+    return stream.readLine().trimmed();
 }
 
 bool DeepSeekClient::setApiKeyAndPersist(const QString &apiKey)
 {
+    const QString dirPath = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    const QString filePath = dirPath + QStringLiteral("/deepseek_api_key.txt");
+
+    if (apiKey.isEmpty()) {
+        // 空 Key → 删除持久化文件
+        m_apiKey.clear();
+        QFile::remove(filePath);
+        // 同时清理旧位置文件（如果存在）
+        QFile::remove(QStringLiteral("deepseek_api_key.txt"));
+        return true;
+    }
+
     m_apiKey = apiKey;
 
-    QFile file(QStringLiteral("deepseek_api_key.txt"));
+    // 确保目录存在
+    QDir().mkpath(dirPath);
+
+    // 原子写入
+    QSaveFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        qWarning() << "[DeepSeekClient] 无法写入 deepseek_api_key.txt，本次设置仅在内存中生效（重启后失效）";
+        qWarning() << "[DeepSeekClient] 无法写入 API Key 持久化文件，本次设置仅在内存中生效";
         return false;
     }
-    QTextStream stream(&file);
-    stream << apiKey;
-    file.close();
+
+    {
+        QTextStream stream(&file);
+        stream << apiKey;
+    }
+
+    if (!file.commit()) {
+        qWarning() << "[DeepSeekClient] API Key 持久化文件写入失败（原子提交失败）";
+        return false;
+    }
+
+    // 回读验证
+    {
+        QFile verifyFile(filePath);
+        if (verifyFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            QTextStream vStream(&verifyFile);
+            if (vStream.readLine().trimmed() != apiKey) {
+                qWarning() << "[DeepSeekClient] API Key 持久化验证失败，内容不匹配";
+                QFile::remove(filePath);
+                m_apiKey.clear();
+                return false;
+            }
+        }
+        // verifyFile 只读不写，不需要显式删除旧位置文件
+    }
+
+    // 写入并验证成功后，删除旧程序目录中的 Key 文件（如存在）
+    QFile::remove(QStringLiteral("deepseek_api_key.txt"));
+
     return true;
 }
 

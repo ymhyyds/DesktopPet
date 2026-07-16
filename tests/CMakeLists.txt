@@ -22,6 +22,8 @@ set(TEST_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/WeatherManagerTest.h
     ${CMAKE_CURRENT_SOURCE_DIR}/EvidenceManagerTest.h
     ${CMAKE_CURRENT_SOURCE_DIR}/MockServer.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/DeepSeekClientKeyPersistenceTest.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/DeepSeekClientKeyPersistenceTest.cpp
 )
 
 add_executable(test_tts ${TEST_SOURCES} ${TESTED_SOURCES})

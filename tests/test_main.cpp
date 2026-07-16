@@ -92,6 +92,9 @@ private slots:
 // ── Evidence Manager MVP ──
 #include "EvidenceManagerTest.h"
 
+// ── DeepSeekClient API Key 持久化 ──
+#include "DeepSeekClientKeyPersistenceTest.h"
+
 // ── Mock server helper ─────────────────────────────────────────────────────
 #include "MockServer.h"
 
@@ -156,6 +159,10 @@ int main(int argc, char *argv[])
     {
         EvidenceManagerTest tc;
         runSuite(QStringLiteral("EvidenceManager"), tc);
+    }
+    {
+        DeepSeekClientKeyPersistenceTest tc;
+        runSuite(QStringLiteral("DeepSeekClient-KeyPersistence"), tc);
     }
 
     qDebug() << "==========================================";
