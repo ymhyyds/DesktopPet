@@ -47,8 +47,13 @@ ui_*.h
 *.exp
 *.obj
 
-# Edge TTS virtual environment (install via tools/edge_tts/install_edge_tts.bat)
+# Edge TTS virtual environment (dev only, not for distribution)
 tools/edge_tts/.venv/
+
+# Edge TTS PyInstaller build output (regenerate via build_pyinstaller.bat)
+tools/edge_tts/edge_tts_py/
+tools/edge_tts/build/
+tools/edge_tts/*.spec
 
 # OS
 .DS_Store

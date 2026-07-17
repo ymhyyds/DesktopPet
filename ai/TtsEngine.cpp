@@ -591,7 +591,7 @@ void TtsEngine::setEdgeTimeoutMs(int ms)
 }
 
 // ============================================================================
-// 插件发现 — 5 级优先级
+// 插件发现 — 6 级优先级
 // ============================================================================
 
 QString TtsEngine::resolveEdgeExecutable() const
@@ -607,14 +607,24 @@ QString TtsEngine::resolveEdgeExecutable() const
     // 2. 项目开发目录：tools/edge_tts/.venv/Scripts/edge-tts.exe
     {
         const QString devPath = QDir::cleanPath(QCoreApplication::applicationDirPath()
-            + QStringLiteral("/../../tools/edge_tts/.venv/Scripts/edge-tts.exe"));
+            + QStringLiteral("/../../tools/edge_tts/edge_tts_py/edge-tts.exe"));
         QFileInfo fi(devPath);
         if (fi.exists() && fi.isFile()) {
             return fi.absoluteFilePath();
         }
     }
 
-    // 3. 应用 plugins 目录：plugins/edge-tts/edge-tts.exe
+    // 3. 应用 release 发布目录：tools/edge_tts/.venv/Scripts/edge-tts.exe
+    {
+        const QString releasePath = QDir::cleanPath(QCoreApplication::applicationDirPath()
+            + QStringLiteral("/tools/edge_tts/edge_tts_py/edge-tts.exe"));
+        QFileInfo fi(releasePath);
+        if (fi.exists() && fi.isFile()) {
+            return fi.absoluteFilePath();
+        }
+    }
+
+    // 4. 应用 plugins 目录：plugins/edge-tts/edge-tts.exe（兼容旧布局）
     {
         const QString pluginPath = QDir::cleanPath(QCoreApplication::applicationDirPath()
             + QStringLiteral("/plugins/edge-tts/edge-tts.exe"));
@@ -624,7 +634,7 @@ QString TtsEngine::resolveEdgeExecutable() const
         }
     }
 
-    // 4. 系统 PATH 中查找 edge-tts.exe
+    // 5. 系统 PATH 中查找 edge-tts.exe
     {
         const QString exe = QStandardPaths::findExecutable(QStringLiteral("edge-tts.exe"));
         if (!exe.isEmpty()) {
@@ -632,7 +642,7 @@ QString TtsEngine::resolveEdgeExecutable() const
         }
     }
 
-    // 5. 系统 PATH 中查找 edge-tts（无扩展名）
+    // 6. 系统 PATH 中查找 edge-tts（无扩展名）
     {
         const QString exe = QStandardPaths::findExecutable(QStringLiteral("edge-tts"));
         if (!exe.isEmpty()) {
@@ -737,6 +747,7 @@ void TtsEngine::startEdgeTts(const QString &sanitized, int gen)
     m_edgeProcess->start(executable, args);
 
     qInfo() << "[TtsEngine] Edge TTS 启动 (req=" << gen
+            << "exe=" << executable
             << "textLength=" << sanitized.length()
             << "voice=" << m_edgeVoice
             << "rate=" << m_edgeRatePercent

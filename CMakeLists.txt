@@ -193,6 +193,11 @@ install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/database
     DESTINATION .
 )
 
+# edge_tts PyInstaller 自包含包——复制完整 onedir 输出
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/tools/edge_tts/edge_tts_py
+    DESTINATION ./tools/edge_tts
+)
+
 # 发布版只包含 Hiyori、Mao、Wanko 三个角色包，
 # xiaoyue 和 纳西妲l2d 保留在源码树但不出现在输出目录中。
 add_custom_command(TARGET DesktopPet POST_BUILD
@@ -210,6 +215,18 @@ add_custom_command(TARGET DesktopPet POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory
         $<TARGET_FILE_DIR:DesktopPet>/database
     COMMENT "Syncing characters (Hiyori/Mao/Wanko) and database to output directory"
+)
+
+# ── 部署 edge_tts PyInstaller 自包含包到输出目录 ──────────────────────────
+# edge_tts_py/ 是 PyInstaller --onedir 的输出，内含 edge-tts.exe + 所有依赖
+set(EDGE_TTS_PY_DIR "${CMAKE_CURRENT_SOURCE_DIR}/tools/edge_tts/edge_tts_py")
+set(EDGE_TTS_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_edge_tts.cmake")
+add_custom_command(TARGET DesktopPet POST_BUILD
+    COMMAND ${CMAKE_COMMAND}
+        -D SRC_DIR="${EDGE_TTS_PY_DIR}"
+        -D TARGET_DIR="$<TARGET_FILE_DIR:DesktopPet>"
+        -P "${EDGE_TTS_SCRIPT}"
+    COMMENT "Copying edge_tts PyInstaller bundle to output directory"
 )
 
 # Windows 下用 windeployqt 拷依赖 dll 的便捷 target（手动调用：cmake --build . --target deploy）
