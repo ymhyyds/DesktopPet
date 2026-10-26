@@ -45,6 +45,11 @@ public:
     void setModel(const QString &model) { m_model = model; }
     void setEndpoint(const QString &endpoint) { m_endpoint = endpoint; }
 
+    // 供独立的 MemoryExtractor 复用同一套 API 配置（不共用连接/请求通道）
+    QString apiKey() const { return m_apiKey; }
+    QString model() const { return m_model; }
+    QString endpoint() const { return m_endpoint; }
+
     void sendMessage(const QString &latestUserText, const QList<ChatMessage> &history);
 
     /**

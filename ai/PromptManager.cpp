@@ -2,6 +2,7 @@
 #include "EvidenceManager.h"
 
 #include <QDateTime>
+#include <QDebug>
 
 void PromptManager::setPersonality(const QString &personality, const QString &characterName)
 {
@@ -121,6 +122,39 @@ void PromptManager::appendAssistantMessage(const QString &content)
     trimHistoryIfNeeded();
 }
 
+void PromptManager::restoreHistory(const QList<ChatMessage> &history)
+{
+    m_history.clear();
+
+    QList<ChatMessage> sanitized;
+    sanitized.reserve(history.size());
+    for (const ChatMessage &msg : history) {
+        const QString role = msg.first.trimmed();
+        if (role != QStringLiteral("user") && role != QStringLiteral("assistant"))
+            continue;
+        const QString content = msg.second.trimmed();
+        if (content.isEmpty())
+            continue;
+        // 接口要求上下文以 user 开头：丢弃开头的 assistant 消息
+        if (sanitized.isEmpty() && role != QStringLiteral("user"))
+            continue;
+        // 连续同角色合并（例如回复失败后连着两条 user），保持 user/assistant 交替
+        if (!sanitized.isEmpty() && sanitized.last().first == role) {
+            sanitized.last().second += QStringLiteral("\n") + content;
+            continue;
+        }
+        sanitized.append(ChatMessage(role, content));
+    }
+
+    m_history = sanitized;
+    trimHistoryIfNeeded();
+
+    qInfo().noquote() << QStringLiteral(
+        "[PromptManager] restoreHistory: input=%1 kept=%2 turns=%3 gen=%4")
+        .arg(history.size()).arg(m_history.size())
+        .arg(m_maxHistoryTurns).arg(m_conversationGeneration);
+}
+
 void PromptManager::trimHistoryIfNeeded()
 {
     const int maxMessages = m_maxHistoryTurns * 2;
@@ -185,6 +219,11 @@ QList<ChatMessage> PromptManager::contextHistory() const
                 "    不得附加到浅草寺、台场海滨公园等已经具名的景点上。\n"
                 "[/对话摘要]")
             .arg(m_conversationSummary)));
+    }
+
+    // 3.5 长期记忆（L3 事实卡片，App 每条消息发出前检索生成）
+    if (!m_memoryContext.isEmpty()) {
+        result.append(ChatMessage(QStringLiteral("system"), m_memoryContext));
     }
 
     // 4. 原始对话证据（源始消息原文引用，非空时注入）

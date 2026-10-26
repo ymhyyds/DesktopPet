@@ -514,6 +514,164 @@ add_test(NAME test_single_instance
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 
+# ── 长期记忆（memories 表 / 抽取器纯逻辑） ──
+# test_memory_db: 迁移/CRUD/FTS 同步/角色隔离，需要 Qt6::Sql（QSQLITE -> 自带 SQLite）。
+# test_memory_extractor: JSON 容错解析 / bigram 相似度 / 关键词推导，不发网络请求。
+
+add_executable(test_memory_db
+    ${CMAKE_CURRENT_SOURCE_DIR}/MemoryDBTest.cpp
+    ${CMAKE_SOURCE_DIR}/memory/MemoryDB.cpp
+    ${CMAKE_SOURCE_DIR}/memory/MemoryDB.h
+)
+
+set_target_properties(test_memory_db PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_memory_db PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/memory
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(test_memory_db PRIVATE
+    Qt6::Test
+    Qt6::Core
+    Qt6::Sql
+)
+
+add_executable(test_memory_extractor
+    ${CMAKE_CURRENT_SOURCE_DIR}/MemoryExtractorTest.cpp
+    ${CMAKE_SOURCE_DIR}/memory/MemoryExtractor.cpp
+    ${CMAKE_SOURCE_DIR}/memory/MemoryExtractor.h
+    ${CMAKE_SOURCE_DIR}/memory/MemoryDB.cpp
+    ${CMAKE_SOURCE_DIR}/memory/MemoryDB.h
+)
+
+set_target_properties(test_memory_extractor PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(test_memory_extractor PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/memory
+    ${CMAKE_SOURCE_DIR}/ai
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(test_memory_extractor PRIVATE
+    Qt6::Test
+    Qt6::Core
+    Qt6::Network
+    Qt6::Sql
+)
+
+if(WIN32)
+    foreach(_mem_test IN ITEMS test_memory_db test_memory_extractor)
+        add_custom_command(TARGET ${_mem_test} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:Qt6::Core>" "$<TARGET_FILE_DIR:${_mem_test}>"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:Qt6::Test>" "$<TARGET_FILE_DIR:${_mem_test}>"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:Qt6::Network>" "$<TARGET_FILE_DIR:${_mem_test}>"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<TARGET_FILE:Qt6::Sql>" "$<TARGET_FILE_DIR:${_mem_test}>"
+            VERBATIM
+        )
+    endforeach()
+endif()
+
+add_test(NAME test_memory_db
+    COMMAND test_memory_db
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+add_test(NAME test_memory_extractor
+    COMMAND test_memory_extractor
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+# ── 历史回填命令行工具 ──
+# 复用 MemoryExtractor::startBackfill，与设置页按钮同一条代码路径。
+# 用法见 tools/backfill_history/main.cpp。
+
+add_executable(backfill_history
+    ${CMAKE_SOURCE_DIR}/tools/backfill_history/main.cpp
+    ${CMAKE_SOURCE_DIR}/memory/MemoryExtractor.cpp
+    ${CMAKE_SOURCE_DIR}/memory/MemoryExtractor.h
+    ${CMAKE_SOURCE_DIR}/memory/MemoryDB.cpp
+    ${CMAKE_SOURCE_DIR}/memory/MemoryDB.h
+)
+
+set_target_properties(backfill_history PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(backfill_history PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/memory
+    ${CMAKE_SOURCE_DIR}/ai
+)
+
+target_link_libraries(backfill_history PRIVATE
+    Qt6::Core
+    Qt6::Network
+    Qt6::Sql
+)
+
+if(WIN32)
+    add_custom_command(TARGET backfill_history POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Core>" "$<TARGET_FILE_DIR:backfill_history>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Network>" "$<TARGET_FILE_DIR:backfill_history>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Sql>" "$<TARGET_FILE_DIR:backfill_history>"
+        VERBATIM
+    )
+endif()
+
+# ── 自动抽取单次验证工具 ──
+# 复用 MemoryExtractor::extractFromRecentMessages，与桌宠自动抽取同一条代码路径。
+# 用法见 tools/extract_once/main.cpp（建议在数据库副本上跑）。
+
+add_executable(extract_once
+    ${CMAKE_SOURCE_DIR}/tools/extract_once/main.cpp
+    ${CMAKE_SOURCE_DIR}/memory/MemoryExtractor.cpp
+    ${CMAKE_SOURCE_DIR}/memory/MemoryExtractor.h
+    ${CMAKE_SOURCE_DIR}/memory/MemoryDB.cpp
+    ${CMAKE_SOURCE_DIR}/memory/MemoryDB.h
+)
+
+set_target_properties(extract_once PROPERTIES
+    WIN32_EXECUTABLE FALSE
+)
+
+target_include_directories(extract_once PRIVATE
+    ${CMAKE_SOURCE_DIR}
+    ${CMAKE_SOURCE_DIR}/memory
+    ${CMAKE_SOURCE_DIR}/ai
+)
+
+target_link_libraries(extract_once PRIVATE
+    Qt6::Core
+    Qt6::Network
+    Qt6::Sql
+)
+
+if(WIN32)
+    add_custom_command(TARGET extract_once POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Core>" "$<TARGET_FILE_DIR:extract_once>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Network>" "$<TARGET_FILE_DIR:extract_once>"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "$<TARGET_FILE:Qt6::Sql>" "$<TARGET_FILE_DIR:extract_once>"
+        VERBATIM
+    )
+endif()
+
 # ── 单实例竞争测试辅助程序 ──
 # 被 test_single_instance 通过 QProcess 调用，模拟两个进程同时启动。
 # 使用自己的 main() + QCoreApplication.

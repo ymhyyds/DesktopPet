@@ -27,6 +27,7 @@ class EmotionAnalyzer;
 class TtsEngine;
 class WeatherManager;
 class MemoryDB;
+class MemoryExtractor;
 class InteractionManager;
 class TrayManager;
 class ChatWindow;
@@ -82,6 +83,35 @@ private:
 
     /// characters/ 目录变更时自动重新扫描角色
     void doAutoScanCharacters();
+
+    /// 把旧角色目录名下的历史消息归并到当前目录名下（目录改名后的一次性迁移）。
+    /// 只改 messages 表的归属，不动角色目录；幂等，可每次启动调用。
+    void migrateLegacyCharacterNames(const QStringList &availableNames);
+
+    /// 从数据库恢复最近若干轮对话到 PromptManager（启动 / 切换角色）。
+    /// 同时刷新聊天窗口的历史记录显示。
+    void restoreCharacterContext(const QString &characterName);
+
+    // ──── 长期记忆（P1+P2） ────
+
+    /// 从 QSettings 读取总开关 / 自动抽取开关。
+    void loadMemorySettings();
+
+    /// 生成注入用的 [长期记忆] 文本块（固定画像 + 动态检索），并回写 hit_count。
+    /// seedText 为空时只取固定画像（挂机搭话场景可传最近话题）。
+    QString buildMemoryBlock(const QString &seedText, int dynamicLimit = 6);
+
+    /// 触发一次自动抽取；成功发出请求返回 true。
+    bool triggerMemoryExtraction(const QString &reason);
+
+    /// 处理 /记住、/忘掉；命中指令返回 true（不发送给 AI）。
+    bool handleMemoryCommand(const QString &text);
+
+    /// 把当前记忆列表推送到设置页。
+    void refreshSettingsMemoryList(const QString &keyword = QString());
+
+    /// 启动九月历史回填（手动按钮 / 测试）。
+    void startMemoryBackfill(const QString &afterIso, const QString &beforeIso);
 
     /// 统一的双窗口 Z-order 策略
     enum class PairedWindowPolicy {
@@ -144,6 +174,7 @@ private:
 
     std::unique_ptr<CharacterLoader>   m_characterLoader;
     std::unique_ptr<MemoryDB>          m_memoryDb;
+    std::unique_ptr<MemoryExtractor>   m_memoryExtractor;
     std::unique_ptr<PromptManager>     m_promptManager;
     std::unique_ptr<EmotionAnalyzer>   m_emotionAnalyzer;
     std::unique_ptr<DeepSeekClient>    m_aiClient;
@@ -178,6 +209,13 @@ private:
 
     // --- AI 请求繁忙标志（防止挂机主动请求覆盖流式 buffer） ---
     bool m_aiBusy = false;
+
+    // ──── 长期记忆状态 ────
+    bool    m_memoryEnabled = true;         // 总开关（默认开）
+    bool    m_autoExtractEnabled = true;    // 自动抽取（默认开）
+    int     m_memoryTurnsSinceExtract = 0;  // 自上次抽取以来的成功对话轮数
+    bool    m_lastReplyWasProactive = false; // 当前在途回复是否由挂机搭话触发
+    QTimer *m_memoryIdleTimer = nullptr;    // 闲置 3 分钟触发抽取
 
     /// 最近一次发送请求时的 conversationGeneration。
     /// 回复到达时与之比较，若已变化则放弃将回复写入 API history

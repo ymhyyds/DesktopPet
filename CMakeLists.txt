@@ -85,6 +85,8 @@ set(AI_SOURCES
 set(MEMORY_SOURCES
     memory/MemoryDB.cpp
     memory/MemoryDB.h
+    memory/MemoryExtractor.cpp
+    memory/MemoryExtractor.h
 )
 
 set(INTERACTION_SOURCES

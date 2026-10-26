@@ -1,6 +1,13 @@
 # Build output
 build/
+build-tests/
 cmake-build-*/
+
+# Ad-hoc build helpers (本机临时脚本)
+build_p1p2.bat
+build_tests.bat
+build_backfill_tool.bat
+build_extract_once.bat
 
 # Runtime generated
 database/

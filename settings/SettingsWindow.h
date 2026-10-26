@@ -3,6 +3,9 @@
 #include <QWidget>
 #include <QCloseEvent>
 #include <QColor>
+#include <QDate>
+
+#include "../memory/MemoryDB.h" // MemoryRecord
 
 class QLineEdit;
 class QCheckBox;
@@ -12,6 +15,10 @@ class QSlider;
 class QLabel;
 class QPushButton;
 class QPlainTextEdit;
+class QListWidget;
+class QListWidgetItem;
+class QProgressBar;
+class QDateEdit;
 class Live2DView;
 
 /**
@@ -63,6 +70,18 @@ public:
     /// AI 说话风格
     void setAiStylePrompt(const QString &prompt);
 
+    // ──── 长期记忆 ────
+    void setLongTermMemoryEnabled(bool enabled);
+    void setAutoMemoryExtractEnabled(bool enabled);
+    /// 当前角色（用于"清空本角色专属记忆"按钮和列表标题）
+    void setMemoryScope(const QString &characterName, const QString &displayName);
+    /// 推送记忆列表，total 为角色可见卡片总数
+    void setMemoryList(const QList<MemoryRecord> &memories, int total);
+    /// 回填状态：progressPercent < 0 时隐藏进度条
+    void setMemoryBackfillStatus(const QString &text, int progressPercent);
+    /// 回填日期范围；from 无效表示不限下界（显示"最早"）
+    void setMemoryBackfillRange(const QDate &from, const QDate &to);
+
 public slots:
     void showAndRaise();
 
@@ -106,6 +125,19 @@ signals:
     /// AI 说话风格
     void aiStylePromptChanged(const QString &stylePrompt);
 
+    // ──── 长期记忆 ────
+    void longTermMemoryToggled(bool enabled);
+    void autoMemoryExtractToggled(bool enabled);
+    void memoryRefreshRequested(const QString &keyword);
+    void memoryUpdateRequested(int id, const QString &content, const QString &kind,
+                               int importance, bool pinned);
+    void memoryDeleteRequested(int id);
+    /// 清空指定角色的专属记忆（"" = 全部）
+    void memoryClearRequested(const QString &characterName);
+    void memoryClearAllRequested();
+    /// 回填 [afterIso, beforeIso)；afterIso 为空表示从最早开始
+    void memoryBackfillRequested(const QString &afterIso, const QString &beforeIso);
+
 protected:
     void closeEvent(QCloseEvent *event) override;
 
@@ -123,6 +155,17 @@ private slots:
     void onEdgeTestSpeechClicked();
     void onBedtimeResetClicked();
     void onStyleResetClicked();
+
+    // 长期记忆
+    void onMemorySearchClicked();
+    void onMemoryRefreshClicked();
+    void onMemoryEditClicked();
+    void onMemoryDeleteClicked();
+    void onMemoryTogglePinClicked();
+    void onMemoryClearScopeClicked();
+    void onMemoryClearAllClicked();
+    void onMemoryBackfillClicked();
+    void onMemoryItemDoubleClicked(QListWidgetItem *item);
 
 private:
     void setupUi();
@@ -185,4 +228,22 @@ private:
     QPlainTextEdit *m_stylePromptEdit   = nullptr;
     QLabel         *m_stylePromptCountLabel = nullptr;
     QPushButton    *m_styleResetBtn     = nullptr;
+
+    // ──── 长期记忆 ────
+    QCheckBox    *m_memoryEnableCheckBox = nullptr;
+    QCheckBox    *m_memoryAutoExtractCheckBox = nullptr;
+    QLineEdit    *m_memorySearchEdit = nullptr;
+    QListWidget  *m_memoryList = nullptr;
+    QLabel       *m_memoryStatusLabel = nullptr;
+    QLabel       *m_memoryBackfillLabel = nullptr;
+    QProgressBar *m_memoryBackfillBar = nullptr;
+    QPushButton  *m_memoryEditBtn = nullptr;
+    QPushButton  *m_memoryDeleteBtn = nullptr;
+    QPushButton  *m_memoryPinBtn = nullptr;
+    QPushButton  *m_memoryClearScopeBtn = nullptr;
+    QPushButton  *m_memoryBackfillBtn = nullptr;
+    QDateEdit    *m_memoryBackfillFrom = nullptr; // 最小日期 = 不限下界（显示“最早”）
+    QDateEdit    *m_memoryBackfillTo   = nullptr;
+    QString       m_memoryScopeName;   // 角色目录名（清空用）
+    QString       m_memoryScopeDisplayName;
 };

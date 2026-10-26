@@ -19,6 +19,13 @@ endif()
 
 set(PYI_DST "${TARGET_DIR}/tools/edge_tts/edge_tts_py")
 
+# 源码树里没有 PyInstaller 产物时（例如只保留部署副本、不再重新打包），
+# 跳过复制而不是让整个构建失败——TTS 用不到时不该阻塞编译。
+if(NOT EXISTS "${SRC_DIR}")
+    message(WARNING "[copy_edge_tts] 源目录不存在，跳过复制：${SRC_DIR}")
+    return()
+endif()
+
 file(COPY "${SRC_DIR}" DESTINATION "${TARGET_DIR}/tools/edge_tts")
 
 message(STATUS "[copy_edge_tts] Done — copied edge_tts_py to ${PYI_DST}")

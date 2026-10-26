@@ -64,6 +64,22 @@ public:
     void appendAssistantMessage(const QString &content);
 
     /**
+     * @brief 用数据库里的历史消息重建 API 短期上下文（启动、切换角色时使用）。
+     *
+     * 与 appendXxx 不同，这里会先清空现有历史再整体写入，且**不递增**
+     * conversationGeneration——调用点都发生在没有在途请求的干净时刻
+     * （App 启动、setPersonality 之后），不需要让旧回复失效。
+     *
+     * 传入的列表按时间正序，只保留 user/assistant；会做以下清洗，
+     * 避免把数据库里的脏数据原样喂给接口：
+     *  - 丢弃空内容、未知 role
+     *  - 丢弃开头连续出现的 assistant（chat completions 接口要求以 user 开始）
+     *  - 连续同角色的消息合并成一条（错误中断容易留下连续 user）
+     * 最后按 maxHistoryTurns 裁剪，保留最新的若干轮。
+     */
+    void restoreHistory(const QList<ChatMessage> &history);
+
+    /**
      * @brief 返回当前应该发给 AI 的完整上下文（包含 system 人格消息 + 最近若干轮对话）。
      *        DeepSeekClient::sendMessage() 会直接把这个列表序列化进请求体。
      */
@@ -125,6 +141,7 @@ public:
 
     /// 历史消息最多保留多少轮（一轮 = 一条 user + 一条 assistant），超出自动裁剪最旧的。
     void setMaxHistoryTurns(int turns) { m_maxHistoryTurns = turns; }
+    int maxHistoryTurns() const { return m_maxHistoryTurns; }
 
     /// 开启/关闭时间感知（默认开启），在 system prompt 中注入当前时间信息。
     void setTimeAwareness(bool enabled) { m_timeAwareness = enabled; }
@@ -133,6 +150,13 @@ public:
     /// 设置天气上下文字段（由 WeatherManager 构建的天气文本，不含时间部分）。
     /// 空字符串表示无天气数据。
     void setWeatherContext(const QString &ctx) { m_weatherContext = ctx; }
+
+    /**
+     * @brief 设置长期记忆块（App 每条消息发出前检索生成）。
+     * 空字符串表示不注入；注入位置在 [对话摘要] 之后、[原始对话证据] 之前。
+     */
+    void setMemoryContext(const QString &block) { m_memoryContext = block; }
+    QString memoryContext() const { return m_memoryContext; }
 
     /// 构建时间/天气感知文本，追加到 system prompt 尾部。
     QString buildEnvironmentContext() const;
@@ -151,6 +175,9 @@ private:
 
     /// 风格切换时生成的中立摘要，通过 contextHistory() 注入为 system 消息。
     QString m_conversationSummary;
+
+    /// 长期记忆注入块（App 每条消息发出前重算）。
+    QString m_memoryContext;
 
     /// 原始对话证据管理器（非拥有指针，可为 nullptr）。
     EvidenceManager *m_evidenceManager = nullptr;

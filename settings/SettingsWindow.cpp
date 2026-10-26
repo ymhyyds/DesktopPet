@@ -18,6 +18,13 @@
 #include <QColorDialog>
 #include <QScrollArea>
 #include <QFileDialog>
+#include <QListWidget>
+#include <QProgressBar>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QMessageBox>
+#include <QDateTime>
+#include <QDateEdit>
 
 SettingsWindow::SettingsWindow(QWidget *parent)
     : QWidget(parent)
@@ -342,6 +349,127 @@ void SettingsWindow::setupUi()
 
     connect(m_styleResetBtn, &QPushButton::clicked, this, &SettingsWindow::onStyleResetClicked);
 
+    // ──── 长期记忆 ────
+    auto *memoryGroup = new QGroupBox(QStringLiteral("长期记忆"), this);
+    auto *memoryLayout = new QVBoxLayout(memoryGroup);
+
+    m_memoryEnableCheckBox = new QCheckBox(
+        QStringLiteral("启用长期记忆（跨重启记住主人说过的事）"), this);
+    m_memoryEnableCheckBox->setChecked(true);
+
+    m_memoryAutoExtractCheckBox = new QCheckBox(
+        QStringLiteral("自动学习（每 6 轮对话或闲置 3 分钟提炼一次）"), this);
+    m_memoryAutoExtractCheckBox->setChecked(true);
+    connect(m_memoryEnableCheckBox, &QCheckBox::toggled, this, [this](bool enabled) {
+        m_memoryAutoExtractCheckBox->setEnabled(enabled);
+    });
+    connect(m_memoryEnableCheckBox, &QCheckBox::toggled,
+            this, &SettingsWindow::longTermMemoryToggled);
+    connect(m_memoryAutoExtractCheckBox, &QCheckBox::toggled,
+            this, &SettingsWindow::autoMemoryExtractToggled);
+
+    auto *memorySearchRow = new QHBoxLayout();
+    m_memorySearchEdit = new QLineEdit(this);
+    m_memorySearchEdit->setPlaceholderText(QStringLiteral("搜索内容 / 关键词 / 对象"));
+    m_memorySearchEdit->setClearButtonEnabled(true);
+    auto *memorySearchBtn = new QPushButton(QStringLiteral("搜索"), this);
+    auto *memoryRefreshBtn = new QPushButton(QStringLiteral("刷新"), this);
+    memorySearchRow->addWidget(m_memorySearchEdit, 1);
+    memorySearchRow->addWidget(memorySearchBtn);
+    memorySearchRow->addWidget(memoryRefreshBtn);
+
+    m_memoryList = new QListWidget(this);
+    m_memoryList->setMinimumHeight(150);
+    m_memoryList->setSelectionMode(QAbstractItemView::SingleSelection);
+    m_memoryList->setAlternatingRowColors(true);
+    m_memoryList->setWordWrap(true);
+
+    m_memoryStatusLabel = new QLabel(QStringLiteral("共 0 条卡片"), this);
+    m_memoryStatusLabel->setStyleSheet(QStringLiteral("font-size: 11px; color: #888;"));
+
+    auto *memoryBtnRow1 = new QHBoxLayout();
+    m_memoryEditBtn = new QPushButton(QStringLiteral("编辑"), this);
+    m_memoryDeleteBtn = new QPushButton(QStringLiteral("删除"), this);
+    m_memoryPinBtn = new QPushButton(QStringLiteral("置顶/取消"), this);
+    memoryBtnRow1->addWidget(m_memoryEditBtn);
+    memoryBtnRow1->addWidget(m_memoryDeleteBtn);
+    memoryBtnRow1->addWidget(m_memoryPinBtn);
+    memoryBtnRow1->addStretch();
+
+    auto *memoryBtnRow2 = new QHBoxLayout();
+    m_memoryClearScopeBtn = new QPushButton(QStringLiteral("清空本角色专属记忆"), this);
+    auto *memoryClearAllBtn = new QPushButton(QStringLiteral("清空全部"), this);
+    m_memoryBackfillBtn = new QPushButton(QStringLiteral("从历史回填"), this);
+    memoryBtnRow2->addWidget(m_memoryClearScopeBtn);
+    memoryBtnRow2->addWidget(memoryClearAllBtn);
+    memoryBtnRow2->addWidget(m_memoryBackfillBtn);
+
+    // 回填时间范围：[起, 止)；起始停留在最小值时显示“最早”，表示不限下界
+    auto *memoryBackfillRangeRow = new QHBoxLayout();
+    auto *backfillRangeLabel = new QLabel(QStringLiteral("回填范围"), this);
+    m_memoryBackfillFrom = new QDateEdit(this);
+    m_memoryBackfillFrom->setCalendarPopup(true);
+    m_memoryBackfillFrom->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    m_memoryBackfillFrom->setMinimumDate(QDate(2000, 1, 1));
+    m_memoryBackfillFrom->setMaximumDate(QDate(2100, 12, 31));
+    m_memoryBackfillFrom->setSpecialValueText(QStringLiteral("最早"));
+    m_memoryBackfillFrom->setDate(m_memoryBackfillFrom->minimumDate());
+    m_memoryBackfillFrom->setToolTip(QStringLiteral("留作「最早」表示从第一条消息开始；否则只回填这一天及之后"));
+    m_memoryBackfillTo = new QDateEdit(this);
+    m_memoryBackfillTo->setCalendarPopup(true);
+    m_memoryBackfillTo->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
+    m_memoryBackfillTo->setMinimumDate(QDate(2000, 1, 1));
+    m_memoryBackfillTo->setMaximumDate(QDate(2100, 12, 31));
+    m_memoryBackfillTo->setDate(QDate(2026, 9, 1));
+    m_memoryBackfillTo->setToolTip(QStringLiteral("只回填这一天之前（不含当天）的消息"));
+    memoryBackfillRangeRow->addWidget(backfillRangeLabel);
+    memoryBackfillRangeRow->addWidget(m_memoryBackfillFrom, 1);
+    memoryBackfillRangeRow->addWidget(new QLabel(QStringLiteral("至"), this));
+    memoryBackfillRangeRow->addWidget(m_memoryBackfillTo, 1);
+
+    m_memoryBackfillLabel = new QLabel(this);
+    m_memoryBackfillLabel->setStyleSheet(QStringLiteral("font-size: 11px; color: #888;"));
+    m_memoryBackfillLabel->setWordWrap(true);
+    m_memoryBackfillBar = new QProgressBar(this);
+    m_memoryBackfillBar->setRange(0, 100);
+    m_memoryBackfillBar->setVisible(false);
+
+    auto *memoryHint = new QLabel(
+        QStringLiteral("对话里可以用 /记住 内容 和 /忘掉 关键词 手动管理。"
+                       "共享画像（标记为「共享」）在切换角色后依然保留。"),
+        this);
+    memoryHint->setStyleSheet(QStringLiteral("font-size: 11px; color: #888;"));
+    memoryHint->setWordWrap(true);
+
+    memoryLayout->addWidget(m_memoryEnableCheckBox);
+    memoryLayout->addWidget(m_memoryAutoExtractCheckBox);
+    memoryLayout->addLayout(memorySearchRow);
+    memoryLayout->addWidget(m_memoryList, 1);
+    memoryLayout->addWidget(m_memoryStatusLabel);
+    memoryLayout->addLayout(memoryBtnRow1);
+    memoryLayout->addLayout(memoryBtnRow2);
+    memoryLayout->addLayout(memoryBackfillRangeRow);
+    memoryLayout->addWidget(m_memoryBackfillBar);
+    memoryLayout->addWidget(m_memoryBackfillLabel);
+    memoryLayout->addWidget(memoryHint);
+    memoryGroup->setLayout(memoryLayout);
+
+    connect(memorySearchBtn, &QPushButton::clicked, this, &SettingsWindow::onMemorySearchClicked);
+    connect(m_memorySearchEdit, &QLineEdit::returnPressed,
+            this, &SettingsWindow::onMemorySearchClicked);
+    connect(memoryRefreshBtn, &QPushButton::clicked, this, &SettingsWindow::onMemoryRefreshClicked);
+    connect(m_memoryEditBtn, &QPushButton::clicked, this, &SettingsWindow::onMemoryEditClicked);
+    connect(m_memoryDeleteBtn, &QPushButton::clicked, this, &SettingsWindow::onMemoryDeleteClicked);
+    connect(m_memoryPinBtn, &QPushButton::clicked, this, &SettingsWindow::onMemoryTogglePinClicked);
+    connect(m_memoryClearScopeBtn, &QPushButton::clicked,
+            this, &SettingsWindow::onMemoryClearScopeClicked);
+    connect(memoryClearAllBtn, &QPushButton::clicked,
+            this, &SettingsWindow::onMemoryClearAllClicked);
+    connect(m_memoryBackfillBtn, &QPushButton::clicked,
+            this, &SettingsWindow::onMemoryBackfillClicked);
+    connect(m_memoryList, &QListWidget::itemDoubleClicked,
+            this, &SettingsWindow::onMemoryItemDoubleClicked);
+
     // --- 保存按钮 ---
     m_saveButton = new QPushButton(QStringLiteral("保存"), this);
     connect(m_saveButton, &QPushButton::clicked, this, &SettingsWindow::onSaveClicked);
@@ -359,6 +487,7 @@ void SettingsWindow::setupUi()
     contentLayout->addWidget(bubbleGroup);
     contentLayout->addWidget(bedtimeGroup);
     contentLayout->addWidget(styleGroup);
+    contentLayout->addWidget(memoryGroup);
     contentLayout->addWidget(interactionGroup);
     contentLayout->addStretch();
 
@@ -882,6 +1011,235 @@ void SettingsWindow::setBedtimeMessage(const QString &msg)
 void SettingsWindow::setBedtimeRandomEnabled(bool enabled)
 {
     m_bedtimeRandomCheckBox->setChecked(enabled);
+}
+
+// ──── 长期记忆 ────────────────────────────────────────────────────────────────
+
+void SettingsWindow::setLongTermMemoryEnabled(bool enabled)
+{
+    QSignalBlocker blocker(m_memoryEnableCheckBox);
+    m_memoryEnableCheckBox->setChecked(enabled);
+    m_memoryAutoExtractCheckBox->setEnabled(enabled);
+}
+
+void SettingsWindow::setAutoMemoryExtractEnabled(bool enabled)
+{
+    QSignalBlocker blocker(m_memoryAutoExtractCheckBox);
+    m_memoryAutoExtractCheckBox->setChecked(enabled);
+}
+
+void SettingsWindow::setMemoryScope(const QString &characterName,
+                                    const QString &displayName)
+{
+    m_memoryScopeName = characterName;
+    m_memoryScopeDisplayName = displayName.isEmpty() ? characterName : displayName;
+    m_memoryClearScopeBtn->setText(QStringLiteral("清空本角色专属记忆"));
+    m_memoryClearScopeBtn->setToolTip(
+        QStringLiteral("只删除「%1」自己的记忆卡片；共享画像和其他角色不受影响")
+            .arg(m_memoryScopeDisplayName));
+}
+
+void SettingsWindow::setMemoryBackfillRange(const QDate &from, const QDate &to)
+{
+    if (m_memoryBackfillFrom) {
+        const QDate clamped = from.isValid()
+            ? qBound(m_memoryBackfillFrom->minimumDate(), from,
+                     m_memoryBackfillFrom->maximumDate())
+            : m_memoryBackfillFrom->minimumDate();
+        m_memoryBackfillFrom->setDate(clamped);
+    }
+    if (m_memoryBackfillTo && to.isValid()) {
+        m_memoryBackfillTo->setDate(
+            qBound(m_memoryBackfillTo->minimumDate(), to,
+                   m_memoryBackfillTo->maximumDate()));
+    }
+}
+
+void SettingsWindow::setMemoryList(const QList<MemoryRecord> &memories, int total)
+{
+    m_memoryList->clear();
+
+    for (const MemoryRecord &m : memories) {
+        const QString pin = (m.status == QStringLiteral("pinned"))
+            ? QStringLiteral("★ ") : QString();
+        const QString scope = (m.characterName == QStringLiteral("*"))
+            ? QStringLiteral("[共享] ") : QString();
+        auto *item = new QListWidgetItem(
+            QStringLiteral("%1%2[%3·%4] %5")
+                .arg(pin, scope, m.kind, QString::number(m.importance), m.content),
+            m_memoryList);
+
+        item->setData(Qt::UserRole, m.id);
+        item->setData(Qt::UserRole + 1, m.content);
+        item->setData(Qt::UserRole + 2, m.kind);
+        item->setData(Qt::UserRole + 3, m.importance);
+        item->setData(Qt::UserRole + 4, m.status == QStringLiteral("pinned"));
+        item->setData(Qt::UserRole + 5, m.subject);
+        item->setToolTip(QStringLiteral("对象：%1\n关键词：%2\n创建：%3\n命中：%4 次")
+                             .arg(m.subject, m.keywords, m.createdAt,
+                                  QString::number(m.hitCount)));
+    }
+
+    m_memoryStatusLabel->setText(
+        QStringLiteral("共 %1 条卡片（当前显示 %2 条）").arg(total).arg(memories.size()));
+}
+
+void SettingsWindow::setMemoryBackfillStatus(const QString &text, int progressPercent)
+{
+    m_memoryBackfillLabel->setText(text);
+    if (progressPercent >= 0) {
+        m_memoryBackfillBar->setVisible(true);
+        m_memoryBackfillBar->setValue(qBound(0, progressPercent, 100));
+    } else {
+        m_memoryBackfillBar->setVisible(false);
+    }
+}
+
+void SettingsWindow::onMemorySearchClicked()
+{
+    emit memoryRefreshRequested(m_memorySearchEdit->text().trimmed());
+}
+
+void SettingsWindow::onMemoryRefreshClicked()
+{
+    emit memoryRefreshRequested(m_memorySearchEdit->text().trimmed());
+}
+
+void SettingsWindow::onMemoryEditClicked()
+{
+    auto *item = m_memoryList->currentItem();
+    if (!item) return;
+
+    const int id = item->data(Qt::UserRole).toInt();
+    const QString content = item->data(Qt::UserRole + 1).toString();
+    const QString kind = item->data(Qt::UserRole + 2).toString();
+    const int importance = item->data(Qt::UserRole + 3).toInt();
+    const bool pinned = item->data(Qt::UserRole + 4).toBool();
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("编辑记忆"));
+    auto *form = new QFormLayout(&dialog);
+
+    auto *contentEdit = new QPlainTextEdit(&dialog);
+    contentEdit->setPlainText(content);
+    contentEdit->setFixedHeight(90);
+
+    auto *kindCombo = new QComboBox(&dialog);
+    kindCombo->addItems({ QStringLiteral("profile"), QStringLiteral("preference"),
+                          QStringLiteral("event"), QStringLiteral("promise"),
+                          QStringLiteral("relationship") });
+    if (kindCombo->findText(kind) >= 0) kindCombo->setCurrentText(kind);
+
+    auto *importanceSpin = new QSpinBox(&dialog);
+    importanceSpin->setRange(1, 5);
+    importanceSpin->setValue(importance);
+
+    auto *pinnedCheck = new QCheckBox(QStringLiteral("置顶（每轮固定注入）"), &dialog);
+    pinnedCheck->setChecked(pinned);
+
+    auto *buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    form->addRow(QStringLiteral("内容："), contentEdit);
+    form->addRow(QStringLiteral("类型："), kindCombo);
+    form->addRow(QStringLiteral("重要度："), importanceSpin);
+    form->addRow(pinnedCheck);
+    form->addRow(buttons);
+
+    if (dialog.exec() != QDialog::Accepted) return;
+
+    const QString newContent = contentEdit->toPlainText().trimmed();
+    if (newContent.isEmpty()) return;
+    emit memoryUpdateRequested(id, newContent, kindCombo->currentText(),
+                               importanceSpin->value(), pinnedCheck->isChecked());
+}
+
+void SettingsWindow::onMemoryDeleteClicked()
+{
+    auto *item = m_memoryList->currentItem();
+    if (!item) return;
+
+    const int id = item->data(Qt::UserRole).toInt();
+    const QString content = item->data(Qt::UserRole + 1).toString();
+    const auto answer = QMessageBox::question(
+        this, QStringLiteral("删除记忆"),
+        QStringLiteral("确定删除这条记忆吗？\n\n%1").arg(content),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer == QMessageBox::Yes) {
+        emit memoryDeleteRequested(id);
+    }
+}
+
+void SettingsWindow::onMemoryTogglePinClicked()
+{
+    auto *item = m_memoryList->currentItem();
+    if (!item) return;
+
+    const int id = item->data(Qt::UserRole).toInt();
+    const QString content = item->data(Qt::UserRole + 1).toString();
+    const QString kind = item->data(Qt::UserRole + 2).toString();
+    const int importance = item->data(Qt::UserRole + 3).toInt();
+    const bool pinned = item->data(Qt::UserRole + 4).toBool();
+    emit memoryUpdateRequested(id, content, kind, importance, !pinned);
+}
+
+void SettingsWindow::onMemoryClearScopeClicked()
+{
+    const auto answer = QMessageBox::question(
+        this, QStringLiteral("清空本角色专属记忆"),
+        QStringLiteral("确定清空「%1」的专属记忆吗？\n"
+                       "共享画像（[共享] 标记）和其他角色的记忆不受影响。")
+            .arg(m_memoryScopeDisplayName),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer == QMessageBox::Yes) {
+        emit memoryClearRequested(m_memoryScopeName);
+    }
+}
+
+void SettingsWindow::onMemoryClearAllClicked()
+{
+    const auto answer = QMessageBox::question(
+        this, QStringLiteral("清空全部长期记忆"),
+        QStringLiteral("确定清空所有角色（含共享画像）的长期记忆吗？此操作不可撤销。"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer == QMessageBox::Yes) {
+        emit memoryClearAllRequested();
+    }
+}
+
+void SettingsWindow::onMemoryBackfillClicked()
+{
+    const bool noLower =
+        (m_memoryBackfillFrom->date() == m_memoryBackfillFrom->minimumDate());
+    const QString fromText = noLower
+        ? QStringLiteral("最早")
+        : m_memoryBackfillFrom->date().toString(QStringLiteral("yyyy-MM-dd"));
+    const QString toText =
+        m_memoryBackfillTo->date().toString(QStringLiteral("yyyy-MM-dd"));
+
+    const auto answer = QMessageBox::question(
+        this, QStringLiteral("从历史回填"),
+        QStringLiteral("回填范围：%1 至 %2（不含 %2 当天）\n"
+                       "该范围内的历史对话会发送给 DeepSeek AI 提炼记忆。\n"
+                       "只在你点击时执行，范围越大消耗 token 越多。\n\n"
+                       "继续吗？")
+            .arg(fromText, toText),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes) return;
+
+    const QString afterIso = noLower
+        ? QString()
+        : m_memoryBackfillFrom->date().toString(QStringLiteral("yyyy-MM-dd"))
+              + QStringLiteral("T00:00:00");
+    const QString beforeIso = toText + QStringLiteral("T00:00:00");
+    emit memoryBackfillRequested(afterIso, beforeIso);
+}
+
+void SettingsWindow::onMemoryItemDoubleClicked(QListWidgetItem *)
+{
+    onMemoryEditClicked();
 }
 
 void SettingsWindow::closeEvent(QCloseEvent *event)
